@@ -105,7 +105,7 @@ label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: .92e
 .site-header nav { display: flex; gap: 18px; margin-left: auto; }
 .hero {
   position: relative; min-height: 78vh; display: flex; align-items: center;
-  background: #000 url('/assets/hero.jpg') center/cover no-repeat;
+  background: #000 url('../../assets/hero.jpg') center/cover no-repeat;
 }
 .hero::before {
   content: ""; position: absolute; inset: 0;
@@ -166,7 +166,7 @@ label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: .92e
 /* ============ ОТКРЫВАЮЩАЯ СЦЕНА ============ */
 .opening {
   position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
-  background: #000 url('/assets/opening.jpg') center/cover no-repeat; text-align: center; padding: 24px;
+  background: #000 url('../../assets/opening.jpg') center/cover no-repeat; text-align: center; padding: 24px;
 }
 .opening::before { content: ""; position: absolute; inset: 0; background: rgba(0,0,0,.55); }
 .opening .inner { position: relative; z-index: 1; max-width: 720px; }

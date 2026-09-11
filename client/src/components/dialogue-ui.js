@@ -2,6 +2,7 @@
 import * as engine from '../game/engine.js';
 import * as dialogue from '../game/dialogue.js';
 import { esc } from '../ui.js';
+import { asset } from '../base.js';
 
 let el = null;
 let rendered = 0;
@@ -60,7 +61,7 @@ export function refresh(force) {
   /* портрет (v0.5): AI-арт для ключевых NPC, иначе эмодзи */
   const hasArt = !npc.ghostOf && PORTRAITS.includes(npc.id);
   const portrait = hasArt
-    ? `<img src="/assets/npc/${npc.id}.jpg" alt="${esc(npc.name)}" onerror="this.remove()">`
+    ? `<img src="${asset(`assets/npc/${npc.id}.jpg`)}" alt="${esc(npc.name)}" onerror="this.remove()">`
     : esc(npc.emoji);
   el.querySelector('#dlg-head').innerHTML = `
     <div class="dlg-portrait">${portrait}</div>

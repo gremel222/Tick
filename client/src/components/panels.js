@@ -9,6 +9,7 @@ import { navigate } from '../router.js';
 import { LOCATIONS, REGIONS, ITEMS, ACHIEVEMENTS, QUESTS, REL_STAGES, RECIPES, KNOWLEDGE_FX, NPCS } from '../game/data.js';
 import { canonList, heardRumors, importantMemories } from '../game/memory.js';
 import { download } from '../screens/public.js';
+import { asset } from '../base.js';
 
 const account = () => acc.current()?.email || null;
 
@@ -192,7 +193,7 @@ export function openJournal(tab = 'quests') {
         const loc = engine.npcLocation(n);
         const place = loc.startsWith('home:') ? 'дома' : LOCATIONS[loc]?.name;
         const art = !n.ghostOf && PORTRAITS.includes(n.id)
-          ? `<div class="ic"><img src="/assets/npc/${n.id}.jpg" alt="${esc(n.name)}" style="width:38px;height:38px;border-radius:10px;object-fit:cover;display:block" onerror="this.remove()"></div>`
+          ? `<div class="ic"><img src="${asset(`assets/npc/${n.id}.jpg`)}" alt="${esc(n.name)}" style="width:38px;height:38px;border-radius:10px;object-fit:cover;display:block" onerror="this.remove()"></div>`
           : `<div class="ic">${n.ghostOf ? '👤' : n.emoji}</div>`;
         return `<div class="list-item">${art}<div style="flex:1">
           <b>${esc(n.name)}</b>${n.ghostOf ? ' <span class="muted">· призрак прошлого</span>' : ''} <span class="muted">· ${esc(n.profession)}</span>

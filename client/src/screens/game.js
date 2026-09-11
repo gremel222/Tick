@@ -11,6 +11,7 @@ import * as cmbUI from '../components/combat-ui.js';
 import { navigate } from '../router.js';
 import { LOCATIONS, REGIONS, ITEMS, ACHIEVEMENTS } from '../game/data.js';
 import * as audio from '../game/audio.js';
+import { href } from '../base.js';
 
 let cleanup = null;
 let logRendered = 0;
@@ -42,14 +43,14 @@ export function render(root) {
     engine.log('sys', 'Ты поднимаешься на ноги. Колени дрожат, но держат. Первый шаг сделан.');
     engine.describeArrival(engine.G.player.location);
     saves.autoSave(account);
-    history.replaceState({}, '', '/play');
+    history.replaceState({}, '', href('/play'));
     pendingAchievementCheck = true; // проверим ачивки после подписки UI (иначе тост не увидим)
   } else if (params.get('story') && window.__pendingChar) {
     engine.storyContinue(window.__pendingChar);
     window.__pendingChar = null;
     engine.describeArrival('village-square');
     saves.autoSave(account);
-    history.replaceState({}, '', '/play');
+    history.replaceState({}, '', href('/play'));
   }
 
   if (!engine.getG()) { renderSaveSelect(root); return; }
