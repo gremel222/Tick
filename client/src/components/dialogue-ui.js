@@ -6,6 +6,9 @@ import { esc } from '../ui.js';
 let el = null;
 let rendered = 0;
 
+/* NPC с AI-портретами (client/assets/npc/) */
+const PORTRAITS = ['marta', 'erik', 'lia', 'bogdan', 'justina', 'hans'];
+
 export function isActive() { return !!el; }
 
 export function mount() {
@@ -54,8 +57,13 @@ export function refresh(force) {
   const g = engine.getG();
   const st = g.world.npcs[npc.id];
   const rel = st.rel;
+  /* портрет (v0.5): AI-арт для ключевых NPC, иначе эмодзи */
+  const hasArt = !npc.ghostOf && PORTRAITS.includes(npc.id);
+  const portrait = hasArt
+    ? `<img src="/assets/npc/${npc.id}.jpg" alt="${esc(npc.name)}" onerror="this.remove()">`
+    : esc(npc.emoji);
   el.querySelector('#dlg-head').innerHTML = `
-    <div class="dlg-portrait">${npc.emoji}</div>
+    <div class="dlg-portrait">${portrait}</div>
     <div style="flex:1">
       <div class="dlg-name">${esc(npc.name)}</div>
       <div class="dlg-prof">${esc(npc.profession)} · ${esc(npc.personality)}</div>

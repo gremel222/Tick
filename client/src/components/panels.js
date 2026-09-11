@@ -159,7 +159,7 @@ export function openJournal(tab = 'quests') {
   const overlay = openModal(head('Журнал'));
   const body = overlay.querySelector('.modal-body');
   const tabs = [
-    ['quests', 'Квесты'], ['events', 'События'], ['people', 'Люди'],
+    ['quests', 'Квесты'], ['events', 'События'], ['people', 'Люди'], ['factions', 'Фракции'],
     ['rumors', 'Слухи'], ['canon', 'Канон'], ['history', 'История'],
   ];
   const render = (id) => {
@@ -191,8 +191,11 @@ export function openJournal(tab = 'quests') {
         const st = g.world.npcs[n.id];
         const loc = engine.npcLocation(n);
         const place = loc.startsWith('home:') ? 'дома' : LOCATIONS[loc]?.name;
-        return `<div class="list-item"><div class="ic">${n.emoji}</div><div style="flex:1">
-          <b>${esc(n.name)}</b> <span class="muted">· ${esc(n.profession)}</span>
+        const art = !n.ghostOf && PORTRAITS.includes(n.id)
+          ? `<div class="ic"><img src="/assets/npc/${n.id}.jpg" alt="${esc(n.name)}" style="width:38px;height:38px;border-radius:10px;object-fit:cover;display:block" onerror="this.remove()"></div>`
+          : `<div class="ic">${n.ghostOf ? '👤' : n.emoji}</div>`;
+        return `<div class="list-item">${art}<div style="flex:1">
+          <b>${esc(n.name)}</b>${n.ghostOf ? ' <span class="muted">· призрак прошлого</span>' : ''} <span class="muted">· ${esc(n.profession)}</span>
           <div class="muted" style="font-size:.88em">Отношения: <b>${esc(engine.stageName(n.id))}</b> · сейчас: ${esc(place)}</div>
           <div class="rel-mini">
             <span class="rel-pill">доверие ${Math.round(st.rel.trust)}</span>
@@ -202,6 +205,23 @@ export function openJournal(tab = 'quests') {
           </div>
         </div></div>`;
       }).join('') : '<p class="muted">Ты ещё никого не встретил.</p>';
+    }
+    if (id === 'factions') {
+      const F = engine.FACTION_INFO || {};
+      const stance = r => r >= 30 ? 'свой человек' : r >= 15 ? 'уважают' : r <= -30 ? 'враг' : r <= -15 ? 'настороженность' : 'нейтрально';
+      html += `<p class="muted" style="font-size:.9em">Репутация живёт своей жизнью: дела меняют её медленно, крупные события — сразу.</p>`;
+      html += Object.keys(F).map(id => {
+        const rep = Math.round(g.world.factions?.[id] || 0);
+        const pct = (rep + 100) / 2;
+        const color = rep >= 30 ? '#7ee2a8' : rep >= 15 ? '#a8c7ee' : rep <= -30 ? '#ff8a80' : rep <= -15 ? '#e2b37e' : '#8a93a6';
+        return `<div class="list-item"><div class="ic">${F[id].icon}</div><div style="flex:1">
+          <b>${esc(F[id].name)}</b> <span class="muted">· ${esc(stance(rep))} · ${rep >= 0 ? '+' : ''}${rep}</span>
+          <div class="muted" style="font-size:.88em">${esc(F[id].desc)}</div>
+          <div style="height:8px;border-radius:999px;background:var(--line);margin-top:6px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${color};transition:width .4s"></div>
+          </div>
+        </div></div>`;
+      }).join('');
     }
     if (id === 'rumors') {
       const hr = heardRumors();
@@ -241,8 +261,12 @@ const GOAL_LABELS = {
   aboutself: 'Рассказать о себе', job: 'Отработать смену', buyfood: 'Купить еды', famous: 'Узнать первое имя',
   temple: 'Побывать в храме', askwhere: 'Спросить, где ты', choose: 'Сделать выбор',
   killwolf: 'Волков добыто', herbs: 'Трав собрано', debtdone: 'Закрыть долг', letter: 'Доставить письмо',
+  tracks: 'Найти следы у моста', report: 'Доложить Каспару', deliver: 'Передать травы Грете',
 };
 function goalLabel(k) { return GOAL_LABELS[k] || k; }
+
+/* NPC с AI-портретами (client/assets/npc/) */
+const PORTRAITS = ['marta', 'erik', 'lia', 'bogdan', 'justina', 'hans'];
 
 /* ---------------- МЕНЮ (Esc) ---------------- */
 export function openMenu() {

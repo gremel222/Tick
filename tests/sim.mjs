@@ -3,6 +3,7 @@ import * as engine from '../client/src/game/engine.js';
 import * as combat from '../client/src/game/combat.js';
 import * as dialogue from '../client/src/game/dialogue.js';
 import { heardRumors, record } from '../client/src/game/memory.js';
+import { NPCS } from '../client/src/game/data.js';
 
 let failures = 0;
 function check(name, cond) {
@@ -115,6 +116,122 @@ check('новый персонаж', g2.player.name === 'Новый Тестер
 check('мир сохранился', g2.world.canon.find(c => c.id === 'caravan').status === 'happened');
 check('старт на площади', g2.player.location === 'village-square');
 check('предшественник в списке', g2.world.flags.storyChars.length >= 1);
+
+console.log('=== 11. v0.5: фракции и репутация ===');
+const gv = engine.getG();
+check('фракции в мире', ['village', 'temple', 'trade', 'forest'].every(k => typeof gv.world.factions[k] === 'number'));
+const vRepBefore = gv.world.factions.village;
+engine.changeFaction('village', 5);
+check('репутация растёт', gv.world.factions.village > vRepBefore);
+
+console.log('=== 12. v0.5: романтика — прогулка и признание ===');
+function placeWith(npcId) {
+  for (let h = 8; h <= 20; h++) {
+    gv.world.min = h * 60;
+    const l = engine.npcLocation(engine.npcById(npcId));
+    if (!l.startsWith('home:')) { gv.player.location = l; return true; }
+  }
+  return false;
+}
+gv.player.energy.current = 100;
+const ula = gv.world.npcs.ula;
+ula.rel.sympathy = 20; ula.rel.romantic = 12;
+check('Ула на месте для прогулки', placeWith('ula'));
+r = engine.doAction({ type: 'walk', npc: 'ula' });
+check('прогулка состоялась', r.ok === true);
+check('романтика выросла', ula.rel.romantic >= 16);
+ula.rel.sympathy = 40; ula.rel.romantic = 30;
+engine.doAction({ type: 'talk', npc: 'ula' });
+r = engine.handleInput('ты мне нравишься');
+check('признание принято', ula.rel.romantic >= 75 && engine.stageIdx('ula') >= 7);
+engine.checkAchievements();
+check('ачивка «Не один в этом мире»', gv.achievements.includes('not-alone'));
+
+console.log('=== 13. v0.5: молитва, ярмарка, паломники ===');
+gv.player.energy.current = 100;
+gv.player.location = 'village-temple';
+r = engine.handleInput('помолиться');
+check('помолиться ок', r.ok === true);
+check('храм заметил', gv.world.factions.temple > 0);
+gv.player.energy.current = 100;
+gv.player.location = 'village-square';
+gv.world.flags.fairToday = true; gv.world.flags.fairDone = false;
+r = engine.handleInput('ярмарка');
+check('ярмарка ок', r.ok === true);
+const pil = gv.world.canon.find(c => c.id === 'pilgrimage');
+pil.status = 'happened';
+gv.world.day = pil.plannedDay; gv.world.flags.pilgrimsDone = false;
+gv.player.energy.current = 100;
+gv.player.location = 'village-temple';
+r = engine.handleInput('паломники');
+check('паломники ок', r.ok === true);
+
+console.log('=== 14. v0.5: цепочка разбойников ===');
+gv.world.day = 12; gv.world.min = 12 * 60;
+gv.player.location = 'road-south';
+r = engine.doAction({ type: 'examine', target: 'road-south', kind: 'loc' });
+check('следы найдены', gv.world.flags.foundTracks === true);
+check('квест «Неспокойный тракт» активен', gv.quests.active.some(q => q.id === 'q-bandits'));
+check('Каспар на месте', placeWith('kaspar'));
+engine.doAction({ type: 'talk', npc: 'kaspar' });
+r = engine.handleInput('следы у моста — разбойники');
+check('Каспар предупреждён', gv.world.flags.warnedGuard === true);
+check('квест «Неспокойный тракт» завершён', gv.quests.completed.includes('q-bandits'));
+engine.handleInput('до свидания');
+check('диалог закрыт', !dialogue.isActive());
+// мир пережил день 20 при перемотке — откатываем канон рейда, чтобы проверить ветку «предупредил стражу»
+const raid = gv.world.canon.find(c => c.id === 'raid');
+raid.status = 'planned'; raid.deviationReason = null;
+gv.world.day = 19; gv.world.min = 12 * 60;
+engine.advanceTime(1440, { silent: true });
+check('канон рейда изменён', raid.status === 'changed');
+check('окно засады: 3 дня', gv.world.flags.ambushDaysLeft === 3);
+gv.player.energy.current = 100;
+gv.player.location = 'road-south';
+const moneyBefore = gv.player.money;
+const villageBefore = gv.world.factions.village;
+r = engine.handleInput('засада');
+check('засада началась', r.ok === true && combat.isActive());
+if (combat.isActive()) {
+  check('врагов трое', combat.state().units.filter(u => !u.isPlayer).length === 3);
+  const st = combat.state();
+  st.units.filter(u => !u.isPlayer).forEach(u => { u.hp = 0; });
+  const pl = st.units.find(u => u.isPlayer);
+  st.turnIdx = st.turnOrder.indexOf(pl);
+  combat.playerAction('defend');
+  check('бой выигран', !combat.isActive());
+  check('награда барона получена', gv.player.money - moneyBefore >= 150);
+  check('деревня благодарна', gv.world.factions.village > villageBefore);
+  check('засада закрыта', gv.world.flags.ambushDone === true && gv.world.flags.ambushDaysLeft === 0);
+}
+
+console.log('=== 15. v0.5: призрак прошлого ===');
+const ghostNpc = NPCS.find(n => n.ghostOf);
+check('призрак предшественника в мире', !!ghostNpc);
+if (ghostNpc) {
+  gv.world.day = 13; gv.world.min = 12 * 60;
+  gv.player.location = 'forest-edge';
+  r = engine.doAction({ type: 'talk', npc: ghostNpc.id });
+  check('диалог с призраком открыт', r.ok !== false && dialogue.isActive());
+  r = engine.handleInput('кто ты?');
+  check('призрак знает, кто он', r.ok === true);
+  r = engine.handleInput('что ты помнишь?');
+  check('призрак помнит мир', r.ok === true);
+  engine.handleInput('до свидания');
+}
+
+console.log('=== 16. v0.5: травы для Греты ===');
+engine.addItem('herb', 6);
+check('Грета на месте', placeWith('greta'));
+engine.doAction({ type: 'talk', npc: 'greta' });
+r = engine.handleInput('травы');
+check('квест трав активен', gv.quests.active.some(q => q.id === 'q-herbs'));
+const qh = gv.quests.active.find(q => q.id === 'q-herbs');
+qh.goals.herbs.have = 5; // собрано в лесу (эмулируем поиск)
+r = engine.handleInput('вот твои травы');
+check('травы переданы (5 из 6)', engine.countItem('herb') === 1);
+check('квест трав завершён', gv.quests.completed.includes('q-herbs'));
+check('награда: зелья', engine.countItem('potion') >= 2);
 
 console.log('');
 console.log(failures === 0 ? '🎉 ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ' : '⚠ ПРОВАЛОВ: ' + failures);

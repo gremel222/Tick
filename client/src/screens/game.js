@@ -10,9 +10,21 @@ import * as dlgUI from '../components/dialogue-ui.js';
 import * as cmbUI from '../components/combat-ui.js';
 import { navigate } from '../router.js';
 import { LOCATIONS, REGIONS, ITEMS, ACHIEVEMENTS } from '../game/data.js';
+import * as audio from '../game/audio.js';
 
 let cleanup = null;
 let logRendered = 0;
+let pendingAchievementCheck = false;
+let lastLoc = null;       // для звука шага и смены эмбиента
+let combatAudio = false;  // в бою — свой эмбиент
+
+/* синхронизация эмбиента с текущим регионом */
+function syncAmbient() {
+  if (combatAudio) return;
+  const g = engine.getG(); if (!g) return;
+  const loc = LOCATIONS[g.player.location]; if (!loc) return;
+  audio.setAmbient(loc.region, g.world.weather);
+}
 
 export function render(root) {
   if (cleanup) { cleanup(); cleanup = null; }
@@ -27,11 +39,11 @@ export function render(root) {
     engine.newGame(window.__pendingChar, { account });
     window.__pendingChar = null;
     engine.G.world.flags.stoodUp = true;
-    engine.checkAchievements();
     engine.log('sys', 'Ты поднимаешься на ноги. Колени дрожат, но держат. Первый шаг сделан.');
     engine.describeArrival(engine.G.player.location);
     saves.autoSave(account);
     history.replaceState({}, '', '/play');
+    pendingAchievementCheck = true; // проверим ачивки после подписки UI (иначе тост не увидим)
   } else if (params.get('story') && window.__pendingChar) {
     engine.storyContinue(window.__pendingChar);
     window.__pendingChar = null;
@@ -42,6 +54,7 @@ export function render(root) {
 
   if (!engine.getG()) { renderSaveSelect(root); return; }
   renderGame(root);
+  if (pendingAchievementCheck) { pendingAchievementCheck = false; engine.checkAchievements(); }
 }
 
 /* ---------------- ВЫБОР СОХРАНЕНИЯ ---------------- */
@@ -153,6 +166,7 @@ function renderGame(root) {
   /* кнопки нижнего меню */
   const openUI = key => {
     if (dlgUI.isActive()) return;
+    audio.sfx('open');
     if (key === 'map') panels.openMap();
     else if (key === 'character') panels.openCharacter();
     else if (key === 'inventory') panels.openInventory();
@@ -190,6 +204,21 @@ function renderGame(root) {
   /* подписка на движок */
   const unsub = engine.subscribe(reason => {
     if (!engine.getG()) return;
+    /* — звук: события — */
+    if (reason === 'levelup') audio.sfx('levelup');
+    else if (reason === 'quest') audio.sfx('quest');
+    else if (reason === 'death') audio.sfx('death');
+    else if (reason && reason.startsWith('achievement:')) audio.sfx('achievement');
+    if (reason === 'combat') { combatAudio = true; audio.sfx('combat'); audio.setAmbient('combat'); }
+    if (reason === 'combat:end') { combatAudio = false; syncAmbient(); }
+    /* — смена локации: шаг + эмбиент региона — */
+    const locNow = engine.getG().player.location;
+    if (locNow !== lastLoc) {
+      if (lastLoc !== null && reason !== 'new' && reason !== 'load') audio.sfx('step');
+      lastLoc = locNow;
+      syncAmbient();
+    }
+    if (reason === 'day') syncAmbient(); // погода нового дня
     if (reason === 'death') { showDeath(); return; }
     if (reason === 'tick') { updateTopbar(); updateStatus(); return; }
     if (reason && reason.startsWith('achievement:')) {
@@ -215,11 +244,68 @@ function renderGame(root) {
   const onUnload = () => saves.autoSave(account);
   window.addEventListener('beforeunload', onUnload);
 
+  /* аудио (v0.5): init по первому жесту — политика браузеров; час для птиц */
+  audio.setHourProvider(() => {
+    const g = engine.getG();
+    return g ? Math.floor(g.world.min / 60) : 12;
+  });
+  const audioInit = () => audio.init();
+  window.addEventListener('pointerdown', audioInit, { once: true, capture: true });
+  window.addEventListener('keydown', audioInit, { once: true, capture: true });
+  syncAmbient(); // стартуем эмбиент региона (заиграет после init)
+
+  /* жесты (4.7): свайп влево — меню, вправо — закрыть; лонг-тап по NPC — осмотр */
+  const gameRoot = document.getElementById('game-root');
+  let touchStart = null;
+  const onTouchStart = e => {
+    touchStart = e.touches.length === 1
+      ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+  };
+  const onTouchEnd = e => {
+    if (!touchStart) return;
+    const dx = e.changedTouches[0].clientX - touchStart.x;
+    const dy = e.changedTouches[0].clientY - touchStart.y;
+    touchStart = null;
+    if (Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx)) return; // короткий/вертикальный — не свайп
+    if (dx < 0) openUI('menu');
+    else {
+      if (modalOpen()) { audio.sfx('close'); closeModal(); }
+      else if (dlgUI.isActive()) engine.handleInput('уйти');
+      else if (cmbUI.isActive()) engine.handleInput('бежать');
+    }
+  };
+  gameRoot.addEventListener('touchstart', onTouchStart, { passive: true });
+  gameRoot.addEventListener('touchend', onTouchEnd, { passive: true });
+  let pressTimer = null;
+  const pressStart = e => {
+    const tag = e.target.closest?.('[data-npc]');
+    if (!tag) return;
+    const npcId = tag.dataset.npc;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      engine.doAction({ type: 'examine', target: npcId, kind: 'npc' });
+    }, 550);
+  };
+  const pressCancel = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  gameRoot.addEventListener('touchstart', pressStart, { passive: true });
+  gameRoot.addEventListener('touchend', pressCancel, { passive: true });
+  gameRoot.addEventListener('touchmove', pressCancel, { passive: true });
+  gameRoot.addEventListener('touchcancel', pressCancel);
+
   cleanup = () => {
     unsub();
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('beforeunload', onUnload);
+    window.removeEventListener('pointerdown', audioInit, { capture: true });
+    window.removeEventListener('keydown', audioInit, { capture: true });
+    gameRoot.removeEventListener('touchstart', onTouchStart);
+    gameRoot.removeEventListener('touchend', onTouchEnd);
+    gameRoot.removeEventListener('touchstart', pressStart);
+    gameRoot.removeEventListener('touchend', pressCancel);
+    gameRoot.removeEventListener('touchmove', pressCancel);
+    gameRoot.removeEventListener('touchcancel', pressCancel);
     engine.stopRealtimeLoop();
+    audio.stop(); // тихо выходим с игрового экрана
   };
 }
 
@@ -319,11 +405,15 @@ function updateActionRow() {
   if (g.player.inventory.some(s => ITEMS[s.id].food)) btns.push(`<button class="btn btn-sm" data-act="eat">🍖 Поесть</button>`);
   if (g.player.location === 'forest-edge' || g.player.location === 'forest-deep') btns.push(`<button class="btn btn-sm" data-act="herbs">🌿 Травы</button>`);
   if (g.player.location === 'forest-edge') btns.push(`<button class="btn btn-sm" data-act="wood">🪵 Хворост</button>`);
+  if (g.player.location === 'village-temple') btns.push(`<button class="btn btn-sm" data-act="pray">🕯 Помолиться</button>`);
+  if (g.player.location === 'village-square' && g.world.flags.fairToday) btns.push(`<button class="btn btn-sm" data-act="fair">🎪 Ярмарка</button>`);
+  if (g.player.location === 'road-south' && g.world.flags.ambushDaysLeft > 0 && !g.world.flags.ambushDone) btns.push(`<button class="btn btn-sm btn-accent" data-act="ambush">⚔ Засада у моста</button>`);
   btns.push(`<button class="btn btn-sm" data-act="rest">🪑 Отдых</button>`);
   btns.push(`<button class="btn btn-sm" data-act="sleep">😴 Спать</button>`);
   document.getElementById('action-row').innerHTML = btns.join('');
   document.getElementById('action-row').querySelectorAll('[data-act]').forEach(b => {
     b.addEventListener('click', () => {
+      audio.sfx('click');
       const act = b.dataset.act;
       if (act === 'move') engine.doAction({ type: 'move', target: b.dataset.target });
       else if (act === 'look') engine.doAction({ type: 'look' });
@@ -333,6 +423,9 @@ function updateActionRow() {
       else if (act === 'eat') engine.doAction({ type: 'eat' });
       else if (act === 'herbs') engine.doAction({ type: 'search', what: 'herbs' });
       else if (act === 'wood') engine.doAction({ type: 'search', what: 'wood' });
+      else if (act === 'pray') engine.doAction({ type: 'pray' });
+      else if (act === 'fair') engine.doAction({ type: 'fair' });
+      else if (act === 'ambush') engine.doAction({ type: 'ambush' });
       else if (act === 'rest') engine.doAction({ type: 'rest', min: 60 });
       else if (act === 'sleep') engine.doAction({ type: 'sleep' });
       updateAll();

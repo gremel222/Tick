@@ -6,7 +6,7 @@
    ============================================================ */
 import { ITEMS, NPCS } from './data.js';
 import { G, getG, log, addItem, removeItem, countItem, hasKnowledge, qprog,
-         changeRel, npcLocation, addSkillXp } from './engine.js';
+         changeRel, npcLocation, addSkillXp, changeFaction } from './engine.js';
 
 const CITY_TAX = 0.05;
 const TRADE_TAX = 0.10;
@@ -42,16 +42,21 @@ export function marketPrice(goodsId) {
 
 /* Цена покупки игроком (в лавке) */
 export function buyPrice(goodsId) {
+  const g = g_world();
   let p = Math.round(marketPrice(goodsId) * 1.15 * (1 + CITY_TAX));
   if (hasKnowledge('economy')) p = Math.round(p * 0.9); // знания прошлой жизни
+  if (g.world.flags.erikDiscount) p = Math.round(p * 0.9); // Эрик в долгу перед тобой
+  if ((g.world.factions?.trade || 0) >= 20) p = Math.round(p * 0.95); // репутация торговых людей
   return Math.max(1, p);
 }
 
 /* Цена продажи игроком (лавка покупает) */
 export function sellPrice(goodsId) {
+  const g = g_world();
   let p = marketPrice(goodsId) * 0.6 * (1 - TRADE_TAX);
   if (hasKnowledge('economy')) p *= 1.1;
-  if (g_world().world.flags.erikDiscount && goodsId) p *= 1.1;
+  if (g.world.flags.erikDiscount && goodsId) p *= 1.1;
+  if ((g.world.factions?.trade || 0) >= 20) p *= 1.05; // репутация торговых людей
   return Math.max(1, Math.round(p));
 }
 
@@ -81,6 +86,7 @@ export function buy(npcId, goodsId, qty = 1) {
   g.world.prices[goodsId].demand += 1;
   addItem(goodsId, qty);
   changeRel(npcId, { respect: 0.5, trust: 0.5 });
+  changeFaction('trade', 0.5);
   addSkillXp('trade', 4);
   if (ITEMS[goodsId].food) qprog('buyfood');
   log('good', '🛒 Ты покупаешь ' + ITEMS[goodsId].name.toLowerCase() + ' ×' + qty + ' за ' + cost + ' м.' + (CITY_TAX ? ' (с городским сбором)' : ''));
@@ -104,6 +110,7 @@ export function sell(npcId, goodsId, qty = 1) {
     g.world.prices[goodsId].demand = Math.max(0, g.world.prices[goodsId].demand - 1);
   }
   changeRel(npcId, { respect: 0.5 });
+  changeFaction('trade', 0.5);
   addSkillXp('trade', 4);
   log('good', '💰 Ты продаёшь ' + ITEMS[goodsId].name.toLowerCase() + ' ×' + qty + ' за ' + gain + ' м. (после торгового сбора)');
   return { ok: true, gain };

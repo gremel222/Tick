@@ -153,6 +153,8 @@ export function canonTick() {
         if (g.world.flags.warnedGuard) {
           deviation(c.id, 'стражника предупредили заранее — у моста ждала засада, разбойников переловили');
           g.world.flags.raidActive = false;
+          g.world.flags.ambushDaysLeft = 3; // окно, когда игрок может присоединиться к засаде
+          log('bad', '⚔ Каспар передал: засада у южного моста назначена. Три дня. Скажи «засада» на южной дороге, если готов.');
         } else {
           c.status = 'happened';
           g.world.flags.raidActive = true;

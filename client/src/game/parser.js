@@ -29,8 +29,13 @@ const INTENTS = {
   wait:     ['подожд', 'ждать', 'пережд', 'подожди', 'жду'],
   work:     ['работ', 'подработ', 'помочь', 'помог', 'поработ'],
   craft:    ['сдела', 'созда', 'изготов', 'смастер', 'скрафт', 'сшить'],
-  search:   ['искать', 'поиск', 'собирать', 'нарвать', 'охотиться', 'охот'],
-  examine:  ['осмотр', 'изуч', 'рассмотр', 'посмотр', 'глян', 'разгляд'],
+  search:    ['искать', 'поиск', 'собирать', 'нарвать', 'охотиться', 'охот'],
+  examine:  ['осмотр', 'изуч', 'рассмотр', 'посмотр', 'глян', 'разгляд', 'след'],
+  pray:     ['молитв', 'помол', 'молюсь', 'молить'],
+  fair:     ['ярмарк'],
+  pilgrims: ['паломн'],
+  ambush:   ['засад'],
+  walk:     ['прогул', 'погуляем', 'гулять с', 'проведать'],
   move:     ['идти', 'иду', 'пойти', 'пойд', 'шаг', 'направ', 'зайт', 'войд', 'выйти', 'верн', 'отправ', 'гуля', 'брод', 'идем', 'домой', 'пойдем', 'топа', 'двиг'],
   look:     ['огляд', 'вокруг', 'осмотреться', 'осмотрюсь'],
   help:     ['помощь', 'хелп', 'команд', 'что можно', 'что я могу', 'подсказ'],
@@ -118,7 +123,7 @@ function resolveNpc(tokens, g) {
 
 function classify(tokens) {
   const text = tokens.join(' ');
-  const order = ['ui', 'buy', 'sell', 'give', 'talk', 'attack', 'eat', 'drink', 'sleep', 'rest', 'wait', 'work', 'craft', 'search', 'examine', 'move', 'look', 'help'];
+  const order = ['ui', 'buy', 'sell', 'give', 'talk', 'attack', 'eat', 'drink', 'sleep', 'rest', 'wait', 'work', 'craft', 'search', 'pray', 'fair', 'pilgrims', 'ambush', 'walk', 'examine', 'move', 'look', 'help'];
   for (const intent of order) {
     for (const kw of INTENTS[intent]) {
       if (kw.includes(' ')) { if (text.includes(kw)) return intent; }
@@ -181,6 +186,16 @@ export function parseAndRun(text) {
   }
 
   if (s.intent === 'look') return doAction({ type: 'look' });
+  if (s.intent === 'pray') return doAction({ type: 'pray' });
+  if (s.intent === 'fair') return doAction({ type: 'fair' });
+  if (s.intent === 'pilgrims') return doAction({ type: 'pilgrims' });
+  if (s.intent === 'ambush') return doAction({ type: 'ambush' });
+  if (s.intent === 'walk') {
+    if (s.npc) return doAction({ type: 'walk', npc: s.npc });
+    const here = npcsAt(g.player.location).filter(x => x.npc.romance);
+    if (here.length === 1) return doAction({ type: 'walk', npc: here[0].npc.id });
+    return clarify(s, 'С кем прогуляться? Скажи: «прогуляться с Улой» (подходит для Улы, Ханса, Каспара, Юстины).');
+  }
   if (s.intent === 'examine') {
     if (s.exKind === 'npc' && s.npc) return doAction({ type: 'examine', target: s.npc, kind: 'npc' });
     if (s.exKind === 'item' && s.item) return doAction({ type: 'examine', target: s.item, kind: 'item' });

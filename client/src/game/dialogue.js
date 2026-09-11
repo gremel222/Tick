@@ -30,7 +30,17 @@ export function start(npcId) {
   D = { npcId, lines: [] };
   const bank = TONES[npc.tone];
   const tier = stageIdx(npcId) >= 3 ? 'greetFriend' : stageIdx(npcId) >= 1 ? 'greetKnown' : 'greet';
-  say('npc', pickLine(bank[tier]));
+  if (npc.ghostOf) {
+    say('npc', '…Ты видишь меня? Значит, ты новый. Я — ' + npc.ghostOf.name + '. Был. Когда-то. Здесь.');
+    say('sys', '👤 У него лицо человека, который уже попрощался. Имя совпадает с именем твоего предшественника.');
+  } else if (stageIdx(npcId) >= 7 && npc.romance) {
+    say('npc', pickLine([
+      'Ты пришёл. Я весь день смотрела на дорогу — и вот.',
+      'Эй. Слушай, у меня всё валится из рук, пока тебя нет. Это, наверное, и есть то самое.',
+    ]));
+  } else {
+    say('npc', pickLine(bank[tier]));
+  }
   // первое знакомство с важными людьми
   if (npc.famous) qprog('famous');
   qprog('talk');
@@ -100,6 +110,13 @@ export function handleInput(text) {
     changeRel(D.npcId, { sympathy: gain, trust: 0.5, suspicion: 0.5 });
     if (npc.tone === 'gossipy' || npc.id === 'agata') addRumor('незнакомец божится, что он из другого мира', 'exaggeration', 'agata');
     return { ok: true };
+  }
+
+  // — прогулка (романтика) —
+  if (/(прогул|пойдем гулять|погуляем|составить компанию|проведать)/.test(t)) {
+    const walkNpc = D.npcId;
+    end(true);
+    return doAction({ type: 'walk', npc: walkNpc });
   }
 
   // — угроза / наезд —
@@ -210,6 +227,68 @@ function topicReply(t) {
 
   const has = (...words) => words.some(w => t.includes(w));
 
+  // — ПРИЗРАХ ПРОШЛОГО: особые ответы на всё —
+  if (npc.ghostOf) {
+    advanceTime(10);
+    if (has('кто ты', 'о себе', 'ты кто')) {
+      say('npc', 'Человек, который не доиграл свою историю. Я умер здесь — ' + npc.ghostOf.cause + ', на ' + npc.ghostOf.day + '-й день. Мир пошёл дальше. А я остался на опушке, между.');
+    } else if (has('помнишь', 'память', 'что было', 'историю')) {
+      const imp = g.world.memory.filter(m => m.important && m.day <= npc.ghostOf.day).slice(-2);
+      if (imp.length) for (const m of imp) say('npc', 'Я помню… «' + m.text + '» — это было при мне. Кажется, при мне.');
+      else say('npc', 'Память — как вода в горсти. Осталось только тепло от того, что я кого-то спас. Или не спас. Не помню.');
+    } else if (has('канон', 'судьб', 'что делать')) {
+      say('npc', 'История уже сломалась там, где я её тронул. Она ломается от каждого взгляда. Не бойся этого — бойся только остановиться.');
+    } else {
+      say('npc', pickLine([
+        'Ты спрашиваешь — я отвечаю. Только ответы мои уже никому не нужны. Кроме, может, тебя.',
+        'Мир большой, а опушка одна. Странно, правда?',
+        'Живи за двоих. У меня не вышло.',
+      ]));
+    }
+    if (st.talkedTotal === undefined) st.talkedTotal = 0;
+    st.talkedTotal += 1;
+    return { ok: true };
+  }
+
+  // — ПРИЗНАНИЕ (романтика) —
+  if (has('нравишься', 'люблю', 'признан', 'влюбл', 'будь моей', 'будь моим', 'быть вместе', 'сердце')) {
+    advanceTime(15);
+    if (!npc.romance) {
+      say('npc', pickLine([
+        '…Ох. Ты славный. Но моё сердце занято — служением и этим миром.',
+        'Мне… лестно. Правда. Но нет.',
+      ]));
+      changeRel(D.npcId, { sympathy: 1, suspicion: 0.5 });
+      return { ok: true };
+    }
+    if (stageIdx(D.npcId) >= 7) {
+      say('npc', pickLine(['Ты уже сказал это. И я уже ответила. Но повторяю: да.', 'И ты — мой. Вот так просто, в этом мире сумасшедших.']));
+      changeRel(D.npcId, { romantic: 2, attachment: 2 });
+      return { ok: true };
+    }
+    if (r.romantic >= 25 && r.sympathy >= 20) {
+      r.romantic = Math.max(r.romantic, 75);
+      changeRel(D.npcId, { attachment: 15, trust: 5 });
+      const confLines = {
+        ula: 'Ула замирает с кружкой в руке. Ставит её. Медленно. «Я думала, ты не заметишь. Дурак ты. Я тоже… я тоже!»',
+        hans: 'Ханс долго смотрит вдаль. Потом — коротко: «Знаю. Я тоже». И протягивает тебе запасную тетиву — на счастье.',
+        kaspar: 'Каспар краснеет, как стажёр перед бароном. «По уставу мне положено молчать. Но… я тоже. Кажется, совсем.»',
+        justina: 'Юстина закрывает книгу. «В книге так не бывает. В жизни — вот бывает». И берёт тебя за руку.',
+      };
+      log('good', '💗 ' + (confLines[npc.id] || 'Вы стоите молча, и это молчание всё говорит само.'));
+      record('important', 'признание в любви — ' + npc.name + ' ответила взаимностью', [D.npcId]);
+      end(true);
+      return { ok: true };
+    }
+    changeRel(D.npcId, { sympathy: -1, romantic: 1 });
+    say('npc', pickLine([
+      '…Рано. Ты хороший, но — рано. Поговорим ещё, погуляем.',
+      'Ты торопишься. Не надо. Хорошее — медленное.',
+    ]));
+    say('sys', 'Пока рано: нужны симпатия и взаимность (прогулки, подарки, время).');
+    return { ok: true };
+  }
+
   // — кто ты / о себе —
   if (has('кто ты', 'о себе', 'расскажи о себе', 'твое дело', 'кем работаешь', 'твоя работа')) {
     advanceTime(10);
@@ -299,20 +378,27 @@ function topicReply(t) {
   }
 
   // — опасность/лес/разбойники —
-  if (has('лес', 'опасн', 'звер', 'волк', 'разбой', 'грабител')) {
+  if (has('лес', 'опасн', 'звер', 'волк', 'разбой', 'грабител', 'след')) {
     advanceTime(10);
-    // предупреждение стражи (квест-механика: измени канон)
-    if ((npc.id === 'kaspar' || npc.id === 'bogdan') && has('предупр', 'разбой', 'южн', 'мост')) {
+    // предупреждение стражи (сюжетная линия: измени канон)
+    if ((npc.id === 'kaspar' || npc.id === 'bogdan') && has('предупр', 'разбой', 'южн', 'мост', 'след')) {
       if (g.world.day < 20 && !g.world.flags.warnedGuard) {
-        g.world.flags.warnedGuard = true;
-        record('important', 'предупредил ' + npc.name + ' о готовящемся нападении разбойников', [D.npcId]);
-        changeRel(D.npcId, { respect: 8, trust: 5 });
-        say('npc', npc.id === 'kaspar'
-          ? 'У моста, говоришь?… Спасибо. Клянусь мечом — засада будет ждать их, а не обоз.'
-          : 'Хм. Человек, который предупреждает, а не ждёт… Ты полезнее, чем кажешься.');
-        say('good', '⚡ Ты изменил будущее: у канона «Разбойники на тракте» теперь другой исход.');
+        if (!g.world.flags.foundTracks) {
+          say('npc', 'Слухи — не факты. Осмотри южную дорогу у моста («осмотреть дорогу», стоя на ней): если там и правда кто-то окопался, я взгляну сам.');
+        } else {
+          g.world.flags.warnedGuard = true;
+          qprog('report');
+          record('important', 'предупредил ' + npc.name + ' о готовящемся нападении разбойников', [D.npcId]);
+          changeRel(D.npcId, { respect: 8, trust: 5 });
+          say('npc', npc.id === 'kaspar'
+            ? 'Следы у моста, кострище… Спасибо. Клянусь мечом — засада будет ждать их, а не обоз. Двадцатого дня будь у моста: пригодишься.'
+            : 'Следы? Хм. Человек, который приносит факты, а не болтовню… Ты полезнее, чем кажешься. Каспар всё устроит.');
+          say('good', '⚡ Ты изменил будущее: у канона «Разбойники на тракте» теперь другой исход. Двадцатого дня — засада у моста.');
+        }
       } else if (g.world.flags.warnedGuard) {
-        say('npc', 'Уже сделано. Ты свой хлеб отработал.');
+        say('npc', g.world.flags.ambushDaysLeft > 0 && !g.world.flags.ambushDone
+          ? 'Жду у моста. Дней до засады: ' + g.world.flags.ambushDaysLeft + '.'
+          : 'Уже сделано. Ты свой хлеб отработал.');
       } else {
         say('npc', 'Поздно предупреждать — что случилось, то случилось.');
       }
@@ -436,12 +522,22 @@ function topicReply(t) {
     return { ok: true };
   }
 
-  // — травы для Греты —
-  if (has('трав') && npc.id === 'greta' && has('принес', 'собрать', 'нужн', 'заказ')) {
-    if (!g.quests.active.some(q => q.id === 'q-herbs') && !g.quests.completed.includes('q-herbs')) {
+  // — травы для Греты (сдача квеста) —
+  if (has('трав') && npc.id === 'greta') {
+    const q = g.quests.active.find(q => q.id === 'q-herbs');
+    if (!q && !g.quests.completed.includes('q-herbs')) {
       activateQuest('q-herbs');
       say('npc', 'Нужны! Пять пучков лечебной травы с опушки — и я в долгу перед тобой. И зельями.');
-    } else say('npc', 'Жду травы. Лес щедрый, если знать, где смотреть.');
+    } else if (q && q.goals.herbs.have >= 5 && countItem('herb') >= 5) {
+      removeItem('herb', 5);
+      qprog('deliver');
+      say('npc', 'Ох, хорошие какие! Свежие, с росой. Держи зелья — и моё слово: если заболеешь, приходи первой.');
+      say('good', 'Ты передал Грете пять пучков трав.');
+    } else if (g.quests.completed.includes('q-herbs')) {
+      say('npc', 'Ты уже сделал для меня больше, чем надо. Заходи — мятный чай всегда горячий.');
+    } else {
+      say('npc', q ? 'Жду травы: ' + q.goals.herbs.have + ' из 5 собрано. Лес щедрый, если знать, где смотреть.' : 'Что с травами?');
+    }
     return { ok: true };
   }
 

@@ -9,6 +9,7 @@ import * as opening from './screens/opening.js';
 import * as pub from './screens/public.js';
 import * as game from './screens/game.js';
 import * as acc from './api/local.js';
+import * as audio from './game/audio.js';
 
 const authed = () => !!acc.current();
 
@@ -54,8 +55,12 @@ window.addEventListener('error', e => {
   console.error(e.error || e.message);
 });
 
-/* применяем сохранённые настройки интерфейса */
-pub.applyBodyClasses(acc.getSettings(acc.current()?.email));
+/* применяем сохранённые настройки интерфейса и звука */
+{
+  const s = acc.getSettings(acc.current()?.email);
+  pub.applyBodyClasses(s);
+  audio.setMuted(s.sound === false);
+}
 
 router.start();
 cookieBanner();

@@ -406,9 +406,10 @@ export const QUESTS = {
   'd6-realize': { title: 'День 6 — Осознание', desc: 'Сложи кусочки: побывай в храме и поговори с Лией о том, куда ты попал.', goals: { temple: 1, askwhere: 1 }, reward: {} },
   'd7-choice':  { title: 'День 7 — Большой выбор', desc: 'Идти за каноном истории или жить своей жизнью? Решение в журнале.', goals: { choose: 1 }, reward: {} },
   'q-wolves':   { title: 'Волки у деревни', desc: 'Богдан заплатит за двух волков из стаи у опушки.', goals: { killwolf: 2 }, reward: { money: 40, respect: 10 }, giver: 'bogdan' },
-  'q-herbs':    { title: 'Травы для Греты', desc: 'Собери пять лечебных трав в лесу и принеси Грете.', goals: { herbs: 5 }, reward: { potion: 2, sympathy: 10 }, giver: 'greta' },
+  'q-herbs':    { title: 'Травы для Греты', desc: 'Собери пять лечебных трав в лесу и принеси Грете.', goals: { herbs: 5, deliver: 1 }, reward: { potion: 2, sympathy: 10 }, giver: 'greta' },
   'q-debt':     { title: 'Долг Эрика', desc: 'Эрик должен Ростиславу 120 монет. Помоги торговцу разобраться с ростовщиком.', goals: { debtdone: 1 }, reward: { trust: 15, discount: true }, giver: 'erik' },
   'q-letter':   { title: 'Письмо Юстины', desc: 'Юстина просит передать письмо караванщику на северном тракте. Тайком от отца.', goals: { letter: 1 }, reward: { sympathy: 12 }, giver: 'justina' },
+  'q-bandits':  { title: 'Неспокойный тракт', desc: 'На южной дороге что-то не так. Осмотри дорогу у моста и расскажи Каспару о находке.', goals: { tracks: 1, report: 1 }, reward: { respect: 8 }, giver: 'kaspar' },
 };
 
 /* ---------- РАБОТА (для действия «работать») ---------- */
@@ -428,6 +429,7 @@ export const ACHIEVEMENTS = [
   { id: 'peaceful', title: 'Мирный житель', hidden: false, check: s => s.world.stats.daysNoCombat >= 30 },
   { id: 'living-legend', title: 'Живая легенда', hidden: true, check: s => s.world.stats.canonDeviations >= 10 },
   { id: 'first-friend', title: 'Первый друг', hidden: false, check: s => Object.values(s.world.npcs).some(n => n.stageIdx >= 3) },
+  { id: 'not-alone', title: 'Не один в этом мире', hidden: false, check: s => Object.values(s.world.npcs).some(n => n.stageIdx >= 7) },
 ];
 
 export const REL_STAGES = ['незнакомец', 'знакомый', 'приятный собеседник', 'друг', 'близкий друг', 'привязанность', 'симпатия', 'отношения'];

@@ -6,8 +6,9 @@
    ============================================================ */
 import { ENEMIES, ITEMS } from './data.js';
 import { getG, log, notify, die, addXp, addItem, countItem, removeItem,
-         combatStats, hasKnowledge, qprog, history, addSkillXp } from './engine.js';
+         combatStats, hasKnowledge, qprog, history, addSkillXp, changeFaction } from './engine.js';
 import { record } from './memory.js';
+import * as audio from './audio.js';
 
 let C = null;
 
@@ -171,6 +172,7 @@ function strike(attacker, target, mult = 1, label = '') {
   const crit = Math.random() * 100 < critChance;
   if (crit) dmg *= 2;
   target.hp = Math.max(0, target.hp - dmg);
+  audio.sfx(crit ? 'crit' : 'hit');
   if (attacker.isPlayer) {
     clog((label ? '⚡ ' + label + '! ' : '') + 'Ты' + (crit ? ' КРИТИЧЕСКИ' : '') + ' бьёшь — ' + target.name + ' получает ' + dmg + ' урона.' + (target.hp <= 0 ? ' ' + target.name + ' повержен!' : ''));
   } else {
@@ -188,7 +190,10 @@ function strike(attacker, target, mult = 1, label = '') {
 
 function onEnemyDown(u) {
   const g = getG();
-  if (u.key === 'wolf' || u.key === 'oldwolf') qprog('killwolf');
+  if (u.key === 'wolf' || u.key === 'oldwolf') {
+    qprog('killwolf');
+    changeFaction('forest', 2); // охотник бережёт лесные троп
+  }
   if (typeof u.key === 'string' && u.key.startsWith('npc:')) {
     const npcId = u.key.slice(4);
     if (g.world.npcs[npcId]) g.world.npcs[npcId].state = 'dead';
@@ -279,8 +284,20 @@ function endCombat(result) {
     addSkillXp('melee', 15);
     const lootStr = Object.keys(lootGot).length ? ', трофеи: ' + Object.entries(lootGot).map(([id, n]) => ITEMS[id].name + ' ×' + n).join(', ') : '';
     clog('🏆 Победа! +' + xp + ' опыта' + (money ? ', +' + money + ' м.' : '') + lootStr + '.');
+    audio.sfx('victory');
     record('important', 'победил в бою: ' + foes.map(f => f.name.toLowerCase()).join(', '), []);
     history('Победа в бою: ' + foes.map(f => f.name).join(', '));
+    // — награда за засаду у моста (сюжетная линия разбойников) —
+    if (ctx.ambush && !g.world.flags.ambushDone) {
+      g.world.flags.ambushDone = true;
+      g.world.flags.ambushDaysLeft = 0;
+      g.player.money += 150;
+      g.world.stats.moneyEarned += 150;
+      changeFaction('village', 10);
+      log('good', '⚔ Разбойники взяты! Каспар жмёт руку: «Обоз цел, люди целы». Барон прислал 150 монет награды. Деревня смотрит на тебя иначе.');
+      record('important', 'участвовал в засаде у моста — разбойничья шайка схвачена', ['kaspar']);
+      history('Засада у моста: шайка схвачена');
+    }
   } else if (result === 'fled') {
     g.world.stats.daysNoCombat = 0;
     record('minor', 'убежал из боя', []);

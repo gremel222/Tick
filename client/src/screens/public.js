@@ -1,5 +1,6 @@
 /* Публичные страницы: вики, рейтинг, юр-страницы, профиль, настройки */
 import { NPCS, FACTIONS, REGIONS, LOCATIONS, CANON_EVENTS, ITEMS, ACHIEVEMENTS, VILLAGE_NAME, DEVLOG } from '../game/data.js';
+import * as audio from '../game/audio.js';
 import { esc } from '../ui.js';
 import { navigate } from '../router.js';
 import * as acc from '../api/local.js';
@@ -179,6 +180,12 @@ export function renderSettings(root) {
         <span class="chip ${!s.hc ? 'sel' : ''}" data-v="off">Обычный</span>
         <span class="chip ${s.hc ? 'sel' : ''}" data-v="on">Высокий</span>
       </div>
+      <label style="margin-top:18px">Звук</label>
+      <div class="chip-row" id="s-sound">
+        <span class="chip ${s.sound !== false ? 'sel' : ''}" data-v="on">Включён</span>
+        <span class="chip ${s.sound === false ? 'sel' : ''}" data-v="off">Выключен</span>
+      </div>
+      <p class="muted" style="font-size:.85em">Живой мир звучит: эмбиент деревни и леса, звуки боя и событий. Браузер включит звук после первого касания.</p>
       <h3>Горячие клавиши</h3>
       <p class="muted" style="font-size:.92em"><span class="kbd">M</span> карта · <span class="kbd">C</span> персонаж · <span class="kbd">I</span> инвентарь · <span class="kbd">J</span> журнал · <span class="kbd">Q</span> квесты · <span class="kbd">Esc</span> меню · <span class="kbd">Enter</span> подтвердить ввод</p>
     </div>`);
@@ -193,6 +200,14 @@ export function renderSettings(root) {
     document.querySelectorAll('#s-hc .chip').forEach(c => c.classList.remove('sel'));
     chip.classList.add('sel');
     applySettings({ hc: chip.dataset.v === 'on' });
+  });
+  document.getElementById('s-sound').addEventListener('click', e => {
+    const chip = e.target.closest('.chip'); if (!chip) return;
+    document.querySelectorAll('#s-sound .chip').forEach(c => c.classList.remove('sel'));
+    chip.classList.add('sel');
+    const on = chip.dataset.v === 'on';
+    audio.setMuted(!on);
+    applySettings({ sound: on });
   });
 }
 

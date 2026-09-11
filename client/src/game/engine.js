@@ -48,11 +48,13 @@ export function newGame(charData, opts = {}) {
     world: {
       day: opts.day ?? 1, min: opts.min ?? 360, weather: 'clear', weatherSince: 360,
       npcs: {},
+      factions: { village: 0, temple: 0, trade: 0, forest: 0 },
       prices: economy.initPrices(),
       canon: CANON_EVENTS.map(c => ({ ...c, status: 'planned', deviationReason: null })),
       memory: [], rumors: [],
       stats: { kills: 0, jobsDone: 0, canonDeviations: 0, daysNoCombat: 0, moneyEarned: 0, daysPlayed: 0 },
-      flags: { visited: ['forest-edge'], visitedCount: 1, forestDangerBonus: 0, caravanDaysLeft: 0, storyChars: [] },
+      flags: { visited: ['forest-edge'], visitedCount: 1, forestDangerBonus: 0, caravanDaysLeft: 0, storyChars: [],
+               foundTracks: false, ambushDaysLeft: 0, ambushDone: false, fairDone: false, prayedDay: 0 },
     },
     quests: { active: [], completed: [] },
     achievements: [],
@@ -73,8 +75,63 @@ export function newGame(charData, opts = {}) {
   return G;
 }
 
-export function loadGame(state) { G = state; economy.ensurePrices(); notify('load'); }
+export function loadGame(state) {
+  G = state;
+  economy.ensurePrices();
+  if (!G.world.factions) G.world.factions = { village: 0, temple: 0, trade: 0, forest: 0 };
+  if (!G.world.flags.ambushDaysLeft) G.world.flags.ambushDaysLeft = 0;
+  ensureStoryGhosts();
+  notify('load');
+}
 export function getG() { return G; }
+
+/* ---------------- ФРАКЦИИ (v0.5) ---------------- */
+export const FACTION_INFO = {
+  village: { name: 'Деревня', icon: '🏘️', desc: 'Староста, поля, общие дела. Доверие деревни открывает работу получше.' },
+  temple:  { name: 'Храм Пламени', icon: '🕯️', desc: 'Вера и забота. Высокая репутация — Лия лечит словом и настоем.' },
+  trade:   { name: 'Торговый дом', icon: '🎩', desc: 'Лавка Эрика и обозы. Хорошие отношения — лучшие цены.' },
+  forest:  { name: 'Лес', icon: '🌲', desc: 'Хозяин чащи. Кто в ладу с лесом — реже встречает зверя.' },
+};
+export function changeFaction(id, delta) {
+  if (!G?.world.factions || !(id in G.world.factions)) return;
+  const before = G.world.factions[id];
+  const after = Math.max(-100, Math.min(100, Math.round((before + delta) * 10) / 10));
+  G.world.factions[id] = after;
+  // вехи репутации — сообщаем
+  const milestones = [15, 30, 50, -15, -30];
+  for (const m of milestones) {
+    if ((before < m && after >= m) || (before > m && after <= m)) {
+      log(m > 0 ? 'good' : 'bad', FACTION_INFO[id].icon + ' Репутация «' + FACTION_INFO[id].name + '»: ' + (after >= 0 ? '+' : '') + after + '.');
+    }
+  }
+  notify('faction');
+}
+
+/* ---------------- ПРИЗРАХ ПРОШЛОГО (story-режим: oldCharacterBecomesNPC) ---------------- */
+export function ensureStoryGhosts() {
+  if (!G?.world?.flags?.storyChars) return;
+  for (const sc of G.world.flags.storyChars) {
+    const id = 'ghost:' + sc.name;
+    if (!NPCS.find(n => n.id === id)) {
+      NPCS.push({
+        id, name: sc.name, age: '—', profession: 'странник в до боли знакомой одежде', emoji: '👤', tone: 'mysterious',
+        personality: 'взгляд из-за края',
+        schedule: [{ s: 480, e: 1200, a: 'стоит на опушке', loc: 'forest-edge' }],
+        goals: ['договорить несказанное'], fears: ['раствориться окончательно'],
+        dreams: ['чтобы его историю додумали'], secrets: ['он — твой предшественник в этом мире'],
+        skills: {}, money: 0, ghostOf: sc,
+        bio: 'Человек, которого ты никогда не встречал — и который носит имя твоего предшественника. Смотрит на мир так, будто уже простился с ним. Однажды.',
+      });
+    }
+    if (!G.world.npcs[id]) {
+      G.world.npcs[id] = {
+        known: false, met: false, talkedTotal: 0, lastTalkDay: 0, jobDoneToday: 0,
+        rel: { trust: 0, respect: 0, sympathy: 0, fear: 0, suspicion: 0, attachment: 0, romantic: 0 },
+        stageIdx: 0,
+      };
+    }
+  }
+}
 
 /* ---------------- ВРЕМЯ ---------------- */
 export function absMin() { return (G.world.day - 1) * DAY + G.world.min; }
@@ -152,6 +209,14 @@ function rollWeather() {
 function onNewDay() {
   G.world.stats.daysNoCombat += 1;
   G.world.stats.daysPlayed += 1;
+  // окно засады у моста тикает (сюжетная линия разбойников)
+  if (G.world.flags.ambushDaysLeft > 0 && !G.world.flags.ambushDone) {
+    G.world.flags.ambushDaysLeft -= 1;
+    if (G.world.flags.ambushDaysLeft === 0) {
+      log('sys', '⚔ Каспар передал: засада у моста прошла без тебя. Двух лихих взяли, но главарь ушёл на юг. «Могло быть лучше», — говорит его взгляд.');
+      history('Пропустил засаду у моста.');
+    }
+  }
   // экономика: обновление раз в игровой день (раздел 10)
   economy.dailyTick();
   // истечение мелких воспоминаний (30 дней)
@@ -210,9 +275,16 @@ export function completeQuest(id) {
   const r = def.reward || {};
   if (r.money) { G.player.money += r.money; G.world.stats.moneyEarned += r.money; }
   if (r.potion) addItem('potion', r.potion);
+  // награды отношений — тому, кто дал поручение
+  if (def.giver && (r.trust || r.respect || r.sympathy)) {
+    changeRel(def.giver, { trust: r.trust || 0, respect: r.respect || 0, sympathy: r.sympathy || 0 });
+  }
+  if (id === 'q-debt') G.world.flags.erikDiscount = true;
+  if (id === 'q-wolves') changeFaction('village', 5);
+  if (id === 'q-herbs') changeFaction('forest', 3);
   log('good', '✅ Задача выполнена: ' + def.title + (r.money ? ' (+' + r.money + ' м.)' : ''));
   addXp(30);
-  memory.record('minor', 'выполнил поручение: ' + def.title, []);
+  memory.record('minor', 'выполнил поручение: ' + def.title, def.giver ? [def.giver] : []);
   notify('quest');
 }
 
@@ -252,6 +324,7 @@ export function addXp(n) {
     G.player.stats.strength += 1;
     G.player.stats[pick(['agility', 'endurance', 'perception', 'intelligence', 'charisma', 'luck'])] += 1;
     log('good', '✦ Уровень ' + G.player.level + '! Здоровье и силы растут.');
+    notify('levelup');
   }
   notify('player');
 }
@@ -406,6 +479,11 @@ export function doAction(a) {
     case 'buy': return dialogue.actBuy(a.npc, a.item, a.qty);
     case 'sell': return dialogue.actSell(a.npc, a.item, a.qty);
     case 'attack': return actAttack(a.target);
+    case 'pray': return actPray();
+    case 'fair': return actFair();
+    case 'pilgrims': return actPilgrims();
+    case 'walk': return actWalk(a.npc);
+    case 'ambush': return actAmbush();
     case 'help': return actHelp();
     default: return { ok: false, msg: 'Такого действия нет.' };
   }
@@ -426,9 +504,10 @@ function actMove(target) {
   if (G.player.location === target) return { ok: false, msg: 'Ты уже здесь.' };
   if (!checkEnergy(5)) return { ok: false };
   const loc = LOCATIONS[target];
-  // риск встречи (danger 0..3+)
+  // риск встречи (danger 0..3+); кто в ладу с лесом — реже встречает зверя
   const danger = locationDanger(target);
-  const p = danger * 0.11 + (isNight() ? 0.05 : 0) + (G.world.flags.raidActive && target === 'road-south' ? 0.15 : 0);
+  const forestGrace = loc.region === 'forest' && G.world.factions.forest >= 15 ? 0.05 : 0;
+  const p = Math.max(0, danger * 0.11 + (isNight() ? 0.05 : 0) + (G.world.flags.raidActive && target === 'road-south' ? 0.15 : 0) - forestGrace);
   advanceTime(cost, { silent: false });
   G.player.energy.current = Math.max(0, G.player.energy.current - 4);
   if (danger > 0 && chance(p)) {
@@ -478,7 +557,8 @@ function actExamine(target, kind) {
     const st = npcState(target);
     st.known = true;
     const r = st.rel;
-    log('sys', npc.emoji + ' ' + npc.name + ' — ' + npc.profession + ', ' + npc.age + ' лет. ' + npc.personality.charAt(0).toUpperCase() + npc.personality.slice(1) + '. Сейчас: ' + npcAction(npc) + '.');
+    log('sys', npc.emoji + ' ' + npc.name + ' — ' + npc.profession + ', ' + (npc.age === '—' ? 'возраст не разобрать' : npc.age + ' лет') + '. ' + npc.personality.charAt(0).toUpperCase() + npc.personality.slice(1) + '. Сейчас: ' + npcAction(npc) + '.');
+    if (npc.ghostOf) log('sys', 'Ты понимаешь это не глазами: этот человек умер здесь ' + npc.ghostOf.day + '-го дня. Причина: ' + npc.ghostOf.cause + '.');
     if (st.met) log('sys', 'Отношение к тебе: ' + stageName(target) + '.' + (r.suspicion > 15 ? ' Смотрит настороженно.' : ''));
     return { ok: true };
   }
@@ -490,6 +570,14 @@ function actExamine(target, kind) {
   }
   const loc = LOCATIONS[target] || LOCATIONS[G.player.location];
   log('sys', loc.icon + ' ' + loc.name + '. ' + loc.desc);
+  // следы разбойников на южной дороге (сюжетная линия)
+  if ((target === 'road-south' || G.player.location === 'road-south') && G.world.day >= 3 && !G.world.flags.foundTracks) {
+    G.world.flags.foundTracks = true;
+    activateQuest('q-bandits');
+    qprog('tracks');
+    log('bad', '🔍 Ты рассматриваешь обочину: свежие следы сапог — трое, не крестьяне. За мостом — кострище, ещё тёплое. Здесь кого-то ждут. Каспару стоит об этом узнать.');
+    memory.record('minor', 'нашёл следы разбойников у южного моста', []);
+  }
   return { ok: true };
 }
 
@@ -589,7 +677,8 @@ function actWork(jobId) {
   if (carryWeight() > maxWeight()) return { ok: false, msg: 'С таким грузом далеко не уйдёшь — сначала разбери сумку.' };
   const npc = npcById(job.npcId);
   advanceTime(job.dur);
-  const pay = rnd(job.pay[0], job.pay[1]) + (skills()[job.skill]?.lvl || 0);
+  const villageBonus = G.world.factions.village >= 30 ? 1.2 : 1; // деревня ценит своих
+  const pay = Math.round((rnd(job.pay[0], job.pay[1]) + (skills()[job.skill]?.lvl || 0)) * villageBonus);
   G.player.money += pay;
   G.world.stats.moneyEarned += pay;
   G.player.energy.current = Math.max(0, G.player.energy.current - rnd(12, 20));
@@ -599,12 +688,15 @@ function actWork(jobId) {
   G.world.npcs[job.npcId].jobDoneToday += 1;
   G.world.stats.jobsDone += 1;
   changeRel(job.npcId, { respect: 1, trust: 1, sympathy: 0.5 });
+  // репутация фракций за труд
+  const jobFaction = { 'j-fields': 'village', 'j-wood': 'forest', 'j-dishes': 'village', 'j-smith': 'village', 'j-herbs': 'forest', 'j-deliver': 'village' }[jobId] || 'village';
+  changeFaction(jobFaction, 2);
   let extra = '';
   if (job.bonus === 'hotmeal') { G.player.hunger = Math.max(0, G.player.hunger - 40); extra = ' Плюс миска похлёбки.'; }
   if (job.bonus === 'herb') { addItem('herb', 1); extra = ' Грета сунула тебе пучок травы — учись, говорит.'; }
   addXp(15 + Math.floor(job.dur / 10));
   qprog('job');
-  log('good', '💪 ' + job.title + ': +' + pay + ' м.' + extra);
+  log('good', '💪 ' + job.title + ': +' + pay + ' м.' + extra + (villageBonus > 1 ? ' (деревня платит своим на 20% больше)' : ''));
   history('Отработал: ' + job.title + ' (+' + pay + ' м.)');
   memory.record('minor', 'работал: ' + job.title.toLowerCase(), [job.npcId]);
   return { ok: true };
@@ -671,9 +763,11 @@ function actAttack(target) {
   if (!npc) return { ok: false, msg: 'Ты не находишь, на кого напасть.' };
   if (npcLocation(npc) !== G.player.location) return { ok: false, msg: npc.name + ' не здесь.' };
   if (npcState(target).state === 'dead') return { ok: false, msg: npc.name + ' уже мёртв.' };
+  if (npc.ghostOf) return { ok: false, msg: 'Кулак проходит сквозь него, как сквозь туман. Некоторые вещи лучше не трогать.' };
   const st = npcState(target);
   st.met = true; st.known = true;
   log('bad', 'Ты бросаешься на ' + npc.name + '!');
+  changeFaction('village', -25);
   const hp = Math.round(40 + (npc.skills.strength || 3) * 8);
   combat.start([{ key: 'npc:' + target, name: npc.name, emoji: npc.emoji, hp, atk: 6 + (npc.skills.melee || 2), def: 2 + (npc.skills.strength || 3) / 2, agi: npc.skills.agility || 5, luck: 3, behavior: 'cunning', xp: 50, loot: {}, money: [Math.min(200, Math.round(npc.money * 0.4)), Math.min(300, Math.round(npc.money * 0.6))] }], { loc: G.player.location, returnTo: G.player.location, vsNpc: target });
   return { ok: true };
@@ -681,7 +775,122 @@ function actAttack(target) {
 
 function actHelp() {
   log('sys', 'Что можно писать (и говорить кнопками):');
-  log('sys', 'идти/пойти в деревню, на площадь, в таверну, к кузнице, в лес, на тракт… · осмотреться · осмотреть <кого/что> · поговорить с Эриком · купить хлеб · продать шкуру · есть/пить · отдыхать · спать · работать · искать травы/хворост · сделать бинт/факел/дубину · подарить цветок Уле · подождать 30 минут · ударить разбойника · помощь');
+  log('sys', 'идти/пойти в деревню, на площадь, в таверну, к кузнице, в лес, на тракт… · осмотреться · осмотреть <кого/что> · поговорить с Эриком · купить хлеб · продать шкуру · есть/пить · отдыхать · спать · работать · искать травы/хворост · сделать бинт/факел/дубину · подарить цветок Уле · позвать на прогулку Юстину · подождать 30 минут · помолиться (в храме) · ударить разбойника · помощь');
+  return { ok: true };
+}
+
+/* ---------------- МОЛИТВА (храм, фракция) ---------------- */
+function actPray() {
+  if (G.player.location !== 'village-temple') return { ok: false, msg: 'Молиться принято в храме — у Пламени Рассвета.' };
+  advanceTime(15);
+  const rep = G.world.factions.temple;
+  if (G.world.flags.prayedDay !== G.world.day) {
+    G.world.flags.prayedDay = G.world.day;
+    changeFaction('temple', 1.5);
+  }
+  let line = pick([
+    'Ты стоишь у тёплого камня. Огонь ровный. Мысли — тише.',
+    'Пламя шевелится, будто слушает. На душе немного легче.',
+    'Свечи пахнут воском и травами. Где-то далеко капает вода.',
+  ]);
+  if (rep >= 15) {
+    const before = G.player.hp.current;
+    G.player.hp.current = Math.min(G.player.hp.max, G.player.hp.current + 15);
+    line += ' Слова Лии ложатся на плечи: +' + Math.round(G.player.hp.current - before) + ' здоровья.';
+    if (npcState('lia').state !== 'dead' && npcLocation(npcById('lia')) === 'village-temple') changeRel('lia', { sympathy: 0.5 });
+  }
+  log('sys', '🕯 ' + line);
+  return { ok: true };
+}
+
+/* ---------------- ЯРМАРКА (канон, день 10) ---------------- */
+function actFair() {
+  if (!G.world.flags.fairToday) return { ok: false, msg: 'Ярмарка бывает в свой день — и только на площади.' };
+  if (G.player.location !== 'village-square') return { ok: false, msg: 'Гулянье — на площади.' };
+  if (G.world.flags.fairDone) return { ok: false, msg: 'Ты уже нагулялся. Ноги гудят, карман звенит.' };
+  if (!checkEnergy(10)) return { ok: false };
+  G.world.flags.fairDone = true;
+  advanceTime(90);
+  G.player.energy.current = Math.max(0, G.player.energy.current - 10);
+  G.player.hunger = Math.max(0, G.player.hunger - 35); // пирог с пылу
+  const pieCost = Math.min(2, G.player.money);
+  G.player.money -= pieCost;
+  log('good', '🎪 Пироги с луком, смех, ребятишки Луки носятся между лотками. Ты платишь ' + pieCost + ' м. за горячий пирог — и он того стоит.');
+  // состязание в беге
+  const agi = G.player.stats.agility + (G.player.stats.luck >= 6 ? 1 : 0);
+  if (agi + rnd(0, 6) >= 11) {
+    const prize = 12;
+    G.player.money += prize;
+    G.world.stats.moneyEarned += prize;
+    log('good', '🏃 Состязание в беге вокруг колодца: ты приходишь первым! Приз — ' + prize + ' м., и Агата уже рассказывает всем, что «новенький-то шустрый».');
+    memory.record('minor', 'выиграл состязание в беге на ярмарке', ['agata', 'luka']);
+  } else {
+    log('sys', '🏃 Состязание в беге: мельников сын оказался быстрее. Ничего, пирог всё равно был лучший.');
+  }
+  for (const x of npcsAt('village-square').slice(0, 3)) changeRel(x.npc.id, { sympathy: 1 });
+  changeFaction('village', 2);
+  addXp(20);
+  return { ok: true };
+}
+
+/* ---------------- ПАЛОМНИКИ (канон, день 25) ---------------- */
+function actPilgrims() {
+  const c = G.world.canon.find(x => x.id === 'pilgrimage');
+  if (!c || c.status !== 'happened' || G.world.day !== c.plannedDay) return { ok: false, msg: 'Паломники приходят в свой день — 25-й, к Пламени Рассвета.' };
+  if (G.player.location !== 'village-temple') return { ok: false, msg: 'Паломники — в храме.' };
+  if (G.world.flags.pilgrimsDone) return { ok: false, msg: 'Ты уже помогал сколько мог.' };
+  if (!checkEnergy(15)) return { ok: false };
+  G.world.flags.pilgrimsDone = true;
+  advanceTime(120);
+  G.player.energy.current = Math.max(0, G.player.energy.current - 18);
+  const tips = rnd(4, 9);
+  G.player.money += tips;
+  G.world.stats.moneyEarned += tips;
+  log('good', '🕯 Ты носишь воду, помогаешь усталым, слушаешь истории дорог. Лия кивает тебе через толпу. Подаяния: +' + tips + ' м.');
+  changeFaction('temple', 5);
+  if (npcState('lia').state !== 'dead') changeRel('lia', { respect: 3, sympathy: 2, trust: 2 });
+  memory.record('minor', 'помогал на дне паломников в храме', ['lia']);
+  addXp(25);
+  return { ok: true };
+}
+
+/* ---------------- ПРОГУЛКА (романтика, v0.5) ---------------- */
+const WALK_LINES = {
+  ula: 'Ула болтает без умолку — про ленты, про море, про всё сразу. Ты успеваешь вставить три слова. Тебе легко.',
+  hans: 'Ханс молчит. Ты молчишь. Между вами — тишина, в которой почему-то не холодно.',
+  kaspar: 'Каспар идёт по краю тракта и показывает приметы: где глухарь токует, где мост скрипит. «Смотри в оба», — говорит он и, кажется, не только про дорогу.',
+  justina: 'Юстина идёт вдоль поля и рассказывает про единственную свою книгу. На середине главы она останавливается и впервые смотрит тебе прямо в глаза.',
+};
+function actWalk(npcId) {
+  const npc = npcById(npcId);
+  if (!npc || !npc.romance) return { ok: false, msg: 'Звать на прогулку можно того, кому ты небезразличен.' };
+  if (npcLocation(npc) !== G.player.location) return { ok: false, msg: npc.name + ' не здесь.' };
+  if (npcState(npcId).state === 'dead') return { ok: false, msg: 'Мёртвым не гулять. Живым — не забывать.' };
+  const h = Math.floor(G.world.min / 60);
+  if (h < 8 || h >= 20) return { ok: false, msg: 'Для прогулки нужен свет: с восьми утра до восьми вечера.' };
+  if (!checkEnergy(10)) return { ok: false };
+  const r = relOf(npcId);
+  if (r.sympathy < 15 && r.romantic < 10) {
+    changeRel(npcId, { suspicion: 1, sympathy: -1 });
+    return { ok: false, msg: npc.name + ' смотрит на тебя с недоумением. Вы едва знакомы — сначала разговор, дело, время.' };
+  }
+  advanceTime(60);
+  G.player.energy.current = Math.max(0, G.player.energy.current - 8);
+  changeRel(npcId, { sympathy: 2.5, romantic: 4, attachment: 2, trust: 1 });
+  log('good', '🚶 ' + (WALK_LINES[npcId] || 'Вы идёте по деревне без цели. Иногда это и есть цель.'));
+  const w = weatherName().toLowerCase();
+  log('sys', 'Над полями — ' + w + '. Час проходит как десять минут.');
+  memory.record('minor', 'гулял с ' + npc.name, [npcId]);
+  return { ok: true };
+}
+
+/* ---------------- ЗАСАДА У МОСТА (сюжетная линия разбойников) ---------------- */
+function actAmbush() {
+  if (G.world.flags.ambushDaysLeft <= 0 || G.world.flags.ambushDone) return { ok: false, msg: 'Сейчас никто не ждёт разбойников у моста.' };
+  if (G.player.location !== 'road-south') return { ok: false, msg: 'Засада — у южного моста.' };
+  if (!checkEnergy(20)) return { ok: false };
+  log('bad', '⚔ Ты занимаешь место у насыпи рядом с Каспаром. Долго — недолго. По тракту цокают копыта: обоз. А из придорожных кустов поднимаются тени…');
+  combat.start(['banditldr', 'bandit', 'bandit'], { loc: 'road-south', returnTo: 'road-south', ambush: true });
   return { ok: true };
 }
 
@@ -696,6 +905,13 @@ export function describeArrival(locId, full = false) {
     for (const x of list) { const st = npcState(x.npc.id); if (!st.known) { st.known = true; log('sys', 'Ты запоминаешь новое лицо: ' + x.npc.name + ' — ' + x.npc.profession + '.'); } }
   } else {
     log('sys', 'Никого. Только ' + (isNight() ? 'ночь и шорохи.' : 'ветер и ты.'));
+  }
+  // контекстные подсказки
+  if (locId === 'road-north' && G.world.flags.caravanDaysLeft > 0) {
+    log('sys', '🐎 Обоз на тракте: караванщик Горм проверяет колёса' + (countItem('letter') > 0 ? ' — письмо Юстины при тебе. Пора: «отдать письмо».' : '.'));
+  }
+  if (locId === 'road-south' && G.world.flags.ambushDaysLeft > 0 && !G.world.flags.ambushDone) {
+    log('bad', '⚔ Каспар ждёт у моста. Засада на разбойников назначена — осталось дней: ' + G.world.flags.ambushDaysLeft + '. Скажи «засада», если готов.');
   }
   const exits = Object.keys(loc.exits).map(id => LOCATIONS[id].name).join(', ');
   log('sys', 'Пути: ' + exits + '.');
@@ -738,6 +954,8 @@ export function storyContinue(newCharData) {
   };
   newGame({ ...newCharData, deathMode: 'story' }, opts);
   G.world = world;
+  if (!G.world.flags.ambushDaysLeft) G.world.flags.ambushDaysLeft = 0;
+  ensureStoryGhosts(); // прежний персонаж остаётся в мире (oldCharacterBecomesNPC)
   log('title', 'Глава следующая. Место того, кто был.');
   log('sys', 'Ты приходишь в себя на площади деревни. Мир помнит твоего предшественника — ты пока нет.');
   activateDayQuests();
