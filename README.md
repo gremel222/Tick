@@ -21,8 +21,15 @@
 ## Онлайн-версия
 
 Игра автоматически публикуется на GitHub Pages: **https://gremel222.github.io/Tick/**
-(workflow `.github/workflows/pages.yml` — деплой при пуше, клиент раздаётся как есть,
-`404.html` = `index.html` для SPA-роутов, базовый путь вычисляется автоматически).
+Источник — папка `docs/` (Settings → Pages → Deploy from a branch → `/docs`).
+Обновить статику после правок клиента:
+
+```bash
+./scripts/build-pages.sh   # копирует client/ → docs/ и делает 404.html = index.html
+```
+
+Базовый путь (`/Tick/`) вычисляется в рантайме (`client/src/base.js`), `404.html`
+даёт SPA-фолбэк для прямых ссылок вида `/Tick/play`.
 
 ## Запуск
 
