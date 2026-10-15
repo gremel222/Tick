@@ -328,6 +328,50 @@ export function deleteShiftCascade(shiftId) {
   });
 }
 
+/* ─────────────────────────── поступления ─────────────────────────── */
+
+/**
+ * Все поступления: сначала новые. Сортируем по дате, а при равных датах —
+ * по порядку добавления (кто позже добавлен, тот выше).
+ */
+export async function listIncomes() {
+  const list = await getAll('incomes');
+  return list.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+}
+
+/**
+ * Создать поступление.
+ * shiftId: id вахты или null — «Без вахты». amount — целые рубли.
+ */
+export function addIncome({ shiftId = null, amount, date, category, note = '' }) {
+  return put('incomes', { shiftId, amount, date, category, note, attachments: [] });
+}
+
+/** Изменить поступление (вложения не трогаем — они живут отдельными записями). */
+export function updateIncome(income) {
+  return put('incomes', income);
+}
+
+/** Сколько вложений пропадёт вместе с поступлением — для текста подтверждения. */
+export async function incomeDeleteStats(id) {
+  const income = await get('incomes', id);
+  return { attachments: income && income.attachments ? income.attachments.length : 0 };
+}
+
+/** Удалить поступление вместе с его вложениями. */
+export function deleteIncomeCascade(id) {
+  return run(['incomes', 'attachments'], 'readwrite', (incomes, attachments) => {
+    const request = incomes.get(id);
+    request.onsuccess = () => {
+      const income = request.result;
+      if (income) {
+        for (const attachmentId of income.attachments || []) attachments.delete(attachmentId);
+      }
+      incomes.delete(id);
+    };
+  });
+}
+
 /* ─────────────────────────── запуск хранилища ─────────────────────────── */
 
 /**

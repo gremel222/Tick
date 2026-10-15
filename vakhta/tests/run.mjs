@@ -88,6 +88,14 @@ async function refresh() {
   app.render();
 }
 
+/** Переключить фильтр: элемент пересоздаётся при перерисовке, поэтому ищем заново. */
+async function setFilter(which, value) {
+  const select = $(which === 'category' ? '#filter-category' : '#filter-shift');
+  select.value = value;
+  select.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(40);
+}
+
 async function submitForm(selector, values) {
   const form = $(selector);
   for (const [name, value] of Object.entries(values)) {
@@ -346,6 +354,182 @@ section('8. Стартовые категории расходов');
   equal('четыре стартовых категории', categories.length, 4);
   equal('порядок категорий', categories.map((category) => category.name).join(','), 'еда,связь,дорога,прочее');
   check('«прочее» помечено как неудаляемое', categories.find((category) => category.name === 'прочее').fixed === true);
+}
+
+
+/* ═══════════════════════════ 9. Поступления ═══════════════════════════ */
+
+/** «15.10.2026» → номер дня (для проверки порядка сортировки). */
+const dayOfText = (text) => {
+  const [d, m, y] = text.split('.').map(Number);
+  return D.dayNumber(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+};
+
+section('9. Поступления: форма и валидация');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+
+  // приводим данные к понятному состоянию: идущая вахта + отдельная завершённая
+  const shifts = await db.listShifts();
+  const main = shifts[0];
+  await db.updateShift({ ...main, arrival: key(-10), workStart: key(-9), workEnd: key(9) });
+  await db.clear('incomes');
+  const finishedId = await db.addShift({ arrival: key(-40), workStart: key(-39), workEnd: key(-12) });
+  await refresh();
+
+  $('.tab[data-tab="incomes"]').click();
+  await sleep(30);
+  equal('вкладка «Поступления» открыта', text('#app-title'), 'Поступления');
+  check('пустое состояние с кнопкой', /Добавить поступление/.test(html()));
+
+  $('[data-act="income-new"]').click();
+  await sleep(30);
+  check('форма поступления открылась', !!$('#income-form'));
+
+  // пустая сумма и битая дата
+  await submitForm('#income-form', { amount: '', date: '2026-13-45' });
+  check('ошибка про пустую сумму', /Введите сумму/.test($('[data-error="amount"]').textContent));
+  check('ошибка про дату', /Укажите дату/.test($('[data-error="date"]').textContent));
+
+  // нулевая сумма
+  await submitForm('#income-form', { amount: '0', date: key(0) });
+  check('ошибка про нулевую сумму', /больше нуля/.test($('[data-error="amount"]').textContent));
+  check('форма не закрылась', !!$('#income-form'));
+
+  // во время ввода подсказка показывает, какая сумма получится
+  const amountInput = $('#f-amount');
+  amountInput.value = '50 000';
+  amountInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await sleep(20);
+  check('подсказка показывает разбор суммы', /50 000 ₽/.test(normalize($('[data-hint="amount"]').textContent)));
+
+  // категории поступлений по заданию
+  const categories = Array.from($('#f-category').options).map((option) => option.value);
+  equal('категории поступлений', categories.join(','), 'аванс,расчёт,премия,отпускные,прочее');
+
+  // вахта по умолчанию — идущая
+  const active = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE);
+  equal('вахта по умолчанию — идущая', String($('#f-shift').value), String(active.id));
+  equal('первый пункт списка вахт — «Без вахты»', $('#f-shift').options[0].value, '');
+
+  // сохраняем корректное поступление
+  await submitForm('#income-form', { amount: '50 000', date: key(-3), category: 'аванс', shiftId: String(active.id), note: 'аванс за 15 дней' });
+  await sleep(80);
+
+  const saved = (await db.listIncomes()).find((income) => income.amount === 50000);
+  check('поступление сохранено с целой суммой', !!saved);
+  equal('категория сохранена', saved.category, 'аванс');
+  equal('привязка к вахте сохранена', saved.shiftId, active.id);
+  equal('заметка сохранена', saved.note, 'аванс за 15 дней');
+  equal('после сохранения вернулись к списку', text('#app-title'), 'Поступления');
+}
+
+section('10. Поступления: список, фильтры, итоги');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const active = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE);
+  const finished = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.DONE);
+
+  await db.addIncome({ shiftId: finished.id, amount: 120000, date: key(-20), category: 'расчёт', note: '' });
+  await db.addIncome({ shiftId: null, amount: 7000, date: key(-1), category: 'прочее', note: 'подработка' });
+  await refresh();
+
+  // список от новых к старым
+  const dates = Array.from(window.document.querySelectorAll('.item__date')).map((node) => dayOfText(node.textContent.trim()));
+  const amounts = Array.from(window.document.querySelectorAll('.item__amount')).map((node) => node.textContent.replace(/\D/g, ''));
+  equal('в списке три поступления', amounts.length, 3);
+  check('первым идёт самое новое по дате', dates[0] >= dates[1] && dates[1] >= dates[2], dates.join(','));
+  equal('в строке видно сумму', amounts[0], '7000');
+
+  // итоги
+  const totals = html();
+  check('итог за вахту (идущая) — 50 000 ₽', /За вахту[^<]*<\/dt><dd class="num">50 000 ₽/.test(totals));
+  check('итог за всё время — 177 000 ₽', /За всё время[^<]*<\/dt><dd class="num">177 000 ₽/.test(totals));
+  check('разбивка по категориям есть', /По категориям/.test(totals) && /аванс/.test(totals));
+  check('в строке видна категория и вахта', /chip chip--accent">прочее/.test(totals) && /chip chip--muted">без вахты/.test(totals));
+
+  // фильтр по категории
+  await setFilter('category', 'расчёт');
+  equal('по фильтру «расчёт» одно поступление', window.document.querySelectorAll('.item').length, 1);
+  check('сумма отфильтрованного поступления', /120 000 ₽/.test(html()));
+  check('итог по фильтру подписан', /По категориям \(по фильтру\)/.test(html()));
+
+  // фильтр по вахте «без вахты»
+  await setFilter('category', 'all');
+  await setFilter('shift', 'none');
+  equal('по фильтру «без вахты» одно поступление', window.document.querySelectorAll('.item').length, 1);
+  check('итог «Без вахты» — 7 000 ₽', /Без вахты[^<]*<\/dt><dd class="num">7 000 ₽/.test(html()));
+
+  // фильтр по завершённой вахте
+  await setFilter('shift', String(finished.id));
+  equal('по фильтру вахты одно поступление', window.document.querySelectorAll('.item').length, 1);
+  check('итог за выбранную вахту — 120 000 ₽', /За вахту[^<]*<\/dt><dd class="num">120 000 ₽/.test(html()));
+
+  // сброс фильтров
+  $('[data-act="filter-reset"]').click();
+  await sleep(30);
+  equal('после сброса видны все три', window.document.querySelectorAll('.item').length, 3);
+}
+
+section('11. Поступления: изменение, вложения, удаление');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const list = await db.listIncomes();
+  const changed = list.find((income) => income.category === 'прочее');
+
+  // редактирование: меняем сумму, дату, категорию и привязку
+  $(`[data-act="income-edit"][data-id="${changed.id}"]`).click();
+  await sleep(40);
+  check('открылась форма редактирования', text('#app-title') === 'Поступление');
+  equal('сумма подставлена в поле', $('#f-amount').value, '7000');
+  equal('категория подставлена', $('#f-category').value, 'прочее');
+  equal('привязка «без вахты» подставлена', $('#f-shift').value, '');
+
+  const active = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE);
+  await submitForm('#income-form', { amount: '9000', date: key(-2), category: 'премия', shiftId: String(active.id), note: 'премия' });
+  await sleep(80);
+  const updated = (await db.listIncomes()).find((income) => income.id === changed.id);
+  equal('сумма обновилась', updated.amount, 9000);
+  equal('категория обновилась', updated.category, 'премия');
+  equal('привязку можно менять', updated.shiftId, active.id);
+
+  // скрепка с числом вложений (загрузка файлов — следующий шаг, данные уже готовы)
+  const attachmentId = await db.put('attachments', { incomeId: updated.id, shiftId: updated.shiftId, name: 'расчётка.jpg', type: 'image/jpeg', size: 20, blob: new NodeBlob(['x']) });
+  await db.updateIncome({ ...updated, attachments: [attachmentId] });
+  await refresh();
+  check('скрепка показывает число вложений', $('.attach') && $('.attach').textContent.trim() === '1');
+
+  // удаление с подтверждением
+  $(`[data-act="income-delete"][data-id="${updated.id}"]`).click();
+  await sleep(80);
+  check('подтверждение упоминает вложения', /Вложения \(1 файл\)/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="cancel"]').click();
+  await sleep(30);
+  equal('отмена сохранила поступление', (await db.listIncomes()).length, 3);
+
+  $(`[data-act="income-delete"][data-id="${updated.id}"]`).click();
+  await sleep(80);
+  $('[data-sheet="ok"]').click();
+  await sleep(140);
+  equal('поступление удалено', (await db.listIncomes()).length, 2);
+  equal('его вложение удалено', (await db.getAll('attachments')).length, 0);
+}
+
+section('12. Суммы на главном экране после добавления поступлений');
+{
+  const active = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE);
+  const finished = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.DONE);
+
+  await db.addIncome({ shiftId: active.id, amount: 30000, date: D.todayKey(), category: 'расчёт', note: '' });
+  await db.addIncome({ shiftId: finished.id, amount: 150000, date: D.todayKey(), category: 'расчёт', note: '' });
+  await refresh();
+
+  $('.tab[data-tab="home"]').click();
+  await sleep(30);
+  if (!app.state.amountsVisible) { $('.money').click(); await sleep(20); }
+  const screen = html();
+  check('за вахту — только поступления идущей вахты (80 000 ₽)', /80 000 ₽/.test(screen));
+  check('всего — все поступления (350 000 ₽)', /350 000 ₽/.test(screen));
 }
 
 /* ═══════════════════════════ итог ═══════════════════════════ */

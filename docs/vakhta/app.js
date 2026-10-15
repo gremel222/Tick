@@ -24,6 +24,7 @@ const state = {
   expenses: [],
   categories: [],
   settings: {},
+  incomeFilter: { category: 'all', shift: 'all' },   // фильтры списка поступлений
   amountsVisible: false,    // показаны ли суммы на главном экране (между запусками не храним)
   amountsTimer: null,
   midnightTimer: null,
@@ -51,6 +52,30 @@ function money(value) {
   return MONEY.format(Math.round(Number(value) || 0));
 }
 
+/** Сумма с рублём: 12345 → «12 345 ₽». */
+function rubles(value) {
+  return `${money(value)} ₽`;
+}
+
+/** «5 поступлений», «1 файл» — число с правильным окончанием. */
+function countText(count, forms) {
+  return `${count} ${D.plural(count, forms)}`;
+}
+
+/**
+ * Разбор суммы из поля ввода. Человек может написать «50 000», «50.000»,
+ * «50,000» — оставляем только цифры (копейки не поддерживаем).
+ * Возвращает { value } или { error } с понятным текстом.
+ */
+function parseAmount(text) {
+  const digits = String(text ?? '').replace(/\D/g, '');
+  if (!digits) return { error: 'Введите сумму' };
+  const value = Number(digits);
+  if (!Number.isFinite(value) || value <= 0) return { error: 'Сумма должна быть больше нуля' };
+  if (value > 999999999) return { error: 'Слишком большая сумма' };
+  return { value };
+}
+
 /** Всплывающее сообщение внизу экрана. */
 function toast(message, kind = '') {
   const root = $('#toast-root');
@@ -76,6 +101,7 @@ const ICON = {
   chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>',
   shift: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   empty: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M9 15h6"/></svg>',
+  paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5 12.3 19.2a4.5 4.5 0 0 1-6.4-6.4l8-8a3 3 0 0 1 4.3 4.3l-8 8a1.5 1.5 0 0 1-2.1-2.1l7.3-7.3"/></svg>',
 };
 
 /* ═══════════════════════════ запуск ═══════════════════════════ */
@@ -110,7 +136,7 @@ async function reload() {
     db.listShifts(),
     db.listCategories(),
     db.getSettings(),
-    db.getAll('incomes'),      // нужны для сумм на главном экране
+    db.listIncomes(),          // отсортированы от новых к старым
     db.getAll('expenses'),
   ]);
   state.shifts = shifts;
@@ -638,6 +664,351 @@ async function deleteShift(id) {
   }
 }
 
+/* ═══════════════════════════ «Поступления» ═══════════════════════════ */
+
+/** Короткая подпись вахты для списков: «01.10–30.10» или «без вахты». */
+function shiftLabel(shiftId) {
+  const shift = shiftId == null ? null : state.shifts.find((item) => item.id === shiftId);
+  if (!shift) return 'без вахты';
+  return `${D.formatDayMonth(shift.arrival)}–${D.formatDayMonth(shift.workEnd)}`;
+}
+
+/** Название категории поступления (по id или по названию из старой копии). */
+function incomeCategory(income) {
+  return db.incomeCategoryName(income.category);
+}
+
+/**
+ * Вахта по умолчанию для нового поступления:
+ * идущая → последняя завершённая → «Без вахты» (по правилу из задания).
+ */
+function defaultIncomeShift(today = D.todayKey()) {
+  const shift = activeShift(today) || lastFinishedShift(today);
+  return shift ? shift.id : null;
+}
+
+/** Поступления, прошедшие фильтры экрана (категория + вахта). */
+function filteredIncomes() {
+  const filter = state.incomeFilter;
+  return state.incomes.filter((income) => {
+    if (filter.category !== 'all' && incomeCategory(income) !== filter.category) return false;
+    if (filter.shift === 'none') return income.shiftId == null;
+    if (filter.shift !== 'all') return String(income.shiftId) === String(filter.shift);
+    return true;
+  });
+}
+
+/** Скрепка с числом вложений (показываем, только если вложения есть). */
+function attachBadge(income) {
+  const count = (income.attachments || []).length;
+  if (!count) return '';
+  return `<span class="attach">${ICON.paperclip}<span>${count}</span></span>`;
+}
+
+function incomesView() {
+  const today = D.todayKey();
+  const filter = state.incomeFilter;
+  const list = filteredIncomes();
+  const filtersActive = filter.category !== 'all' || filter.shift !== 'all';
+
+  const items = list.map((income) => `
+    <li class="item">
+      <div class="item__main">
+        <span class="item__amount num">${rubles(income.amount)}</span>
+        <span class="item__date num">${D.formatDate(income.date)}</span>
+      </div>
+      <div class="item__meta">
+        <span class="chip chip--accent">${esc(incomeCategory(income))}</span>
+        <span class="chip chip--muted">${esc(shiftLabel(income.shiftId))}</span>
+        ${attachBadge(income)}
+      </div>
+      ${income.note ? `<p class="item__note">${esc(income.note)}</p>` : ''}
+      <div class="item__actions">
+        <button class="btn" data-act="income-edit" data-id="${income.id}">Изменить</button>
+        <button class="btn btn--danger" data-act="income-delete" data-id="${income.id}">Удалить</button>
+      </div>
+    </li>`).join('');
+
+  const emptyList = state.incomes.length === 0
+    ? `<div class="empty">
+         <div class="empty__icon">${ICON.income}</div>
+         <h2>Поступлений пока нет</h2>
+         <p>Записывайте аванс, расчёт, премии и отпускные — приложение посчитает, сколько заработано за вахту.</p>
+       </div>`
+    : '<p class="muted center">По этому фильтру ничего нет</p>';
+
+  return {
+    title: 'Поступления',
+    html: `
+      ${state.incomes.length ? totalsCard(today) : ''}
+      ${state.incomes.length || state.shifts.length ? filterCard() : ''}
+      ${list.length ? `<ul class="list">${items}</ul>` : emptyList}
+      <div class="add-bar">
+        <button class="btn btn--primary btn--block" data-act="income-new">Добавить поступление</button>
+      </div>
+      ${filtersActive && !list.length ? '<button class="btn btn--block" data-act="filter-reset">Сбросить фильтры</button>' : ''}`,
+  };
+}
+
+/** Итоги: за вахту (по выбранной привязке), за всё время, по категориям. */
+function totalsCard(today) {
+  const filter = state.incomeFilter;
+  const rows = [];
+
+  // «За вахту»: явно выбранная вахта, иначе контекстная (идущая → последняя завершённая → предстоящая)
+  let shift = null;
+  if (filter.shift === 'all') shift = contextShift(today);
+  else if (filter.shift !== 'none') shift = state.shifts.find((item) => String(item.id) === String(filter.shift)) || null;
+
+  if (shift) {
+    rows.push([`За вахту · ${D.formatRange(shift.arrival, shift.workEnd)}`,
+      sum(incomesOfShift(shift.id).map((income) => income.amount))]);
+  } else if (filter.shift === 'none') {
+    rows.push(['Без вахты', sum(incomesOfShift(null).map((income) => income.amount))]);
+  }
+  // «За всё время» включая записи «Без вахты»
+  rows.push(['За всё время', sum(state.incomes.map((income) => income.amount))]);
+
+  // по категориям — по текущему фильтру (то есть по тому, что видно в списке)
+  const byCategory = db.INCOME_CATEGORIES
+    .map((category) => ({
+      name: category.name,
+      total: sum(filteredIncomes().filter((income) => incomeCategory(income) === category.name)
+        .map((income) => income.amount)),
+    }))
+    .filter((row) => row.total > 0);
+
+  return `
+    <section class="card">
+      <h2 class="card-title">Итоги</h2>
+      <dl class="kv">
+        ${rows.map(([label, value]) => `
+          <div class="kv__row"><dt>${esc(label)}</dt><dd class="num">${rubles(value)}</dd></div>`).join('')}
+      </dl>
+      <div class="divider divider--gap"></div>
+      <h2 class="card-title">По категориям${filter.category !== 'all' || filter.shift !== 'all' ? ' (по фильтру)' : ''}</h2>
+      ${byCategory.length
+        ? `<dl class="kv">${byCategory.map((row) => `
+            <div class="kv__row"><dt>${esc(row.name)}</dt><dd class="num">${rubles(row.total)}</dd></div>`).join('')}</dl>`
+        : '<p class="muted small">Пока пусто</p>'}
+    </section>`;
+}
+
+/** Фильтры по категории и вахте. */
+function filterCard() {
+  const filter = state.incomeFilter;
+  const categoryOptions = [['all', 'все категории']]
+    .concat(db.INCOME_CATEGORIES.map((category) => [category.name, category.name]))
+    .map(([value, label]) => `<option value="${esc(value)}"${filter.category === value ? ' selected' : ''}>${esc(label)}</option>`)
+    .join('');
+
+  const shiftOptions = [['all', 'все вахты'], ['none', 'без вахты']]
+    .concat(state.shifts.map((shift) => [String(shift.id), D.formatRange(shift.arrival, shift.workEnd)]))
+    .map(([value, label]) => `<option value="${esc(value)}"${filter.shift === value ? ' selected' : ''}>${esc(label)}</option>`)
+    .join('');
+
+  return `
+    <section class="card">
+      <div class="filters">
+        <div class="field">
+          <label class="field__label" for="filter-category">Категория</label>
+          <select class="select" id="filter-category" data-act="filter" data-filter="category">${categoryOptions}</select>
+        </div>
+        <div class="field">
+          <label class="field__label" for="filter-shift">Вахта</label>
+          <select class="select" id="filter-shift" data-act="filter" data-filter="shift">${shiftOptions}</select>
+        </div>
+      </div>
+      ${filter.category !== 'all' || filter.shift !== 'all'
+        ? '<button class="link filters__reset" data-act="filter-reset">Сбросить фильтры</button>' : ''}
+    </section>`;
+}
+
+/* ── форма поступления ── */
+
+function incomeFormView(params) {
+  const editing = params.id != null ? state.incomes.find((income) => income.id === params.id) : null;
+  const today = D.todayKey();
+
+  const amount = editing ? String(editing.amount) : '';
+  const date = editing ? editing.date : today;
+  const category = editing ? incomeCategory(editing) : db.INCOME_CATEGORIES[0].name;
+  const shiftId = editing ? (editing.shiftId ?? null) : defaultIncomeShift(today);
+  const note = editing ? editing.note || '' : '';
+
+  const categoryOptions = db.INCOME_CATEGORIES
+    .map((item) => `<option value="${esc(item.name)}"${item.name === category ? ' selected' : ''}>${esc(item.name)}</option>`)
+    .join('');
+
+  const shiftOptions = [`<option value=""${shiftId == null ? ' selected' : ''}>Без вахты</option>`]
+    .concat(state.shifts.map((shift) => {
+      const status = D.shiftStatus(shift, today);
+      const suffix = status === D.ACTIVE ? ' · идёт' : status === D.PLANNED ? ' · предстоит' : ' · завершена';
+      const label = D.formatRange(shift.arrival, shift.workEnd) + suffix;
+      return `<option value="${shift.id}"${String(shiftId) === String(shift.id) ? ' selected' : ''}>${esc(label)}</option>`;
+    })).join('');
+
+  return {
+    title: editing ? 'Поступление' : 'Новое поступление',
+    html: `
+      <form class="form" id="income-form" data-act="income-save" data-id="${editing ? editing.id : ''}" novalidate>
+        <div class="field">
+          <label class="field__label" for="f-amount">Сумма, ₽</label>
+          <input class="input num" id="f-amount" name="amount" type="text" inputmode="numeric"
+                 autocomplete="off" placeholder="50000" value="${esc(amount)}">
+          <span class="field__hint" data-hint="amount">Только целые рубли, без копеек</span>
+          <span class="field__error hidden" data-error="amount"></span>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="f-date">Дата</label>
+          <input class="input num" id="f-date" name="date" type="date" value="${esc(date)}">
+          <span class="field__error hidden" data-error="date"></span>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="f-category">Категория</label>
+          <select class="select" id="f-category" name="category">${categoryOptions}</select>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="f-shift">Вахта</label>
+          <select class="select" id="f-shift" name="shiftId">${shiftOptions}</select>
+          <span class="field__hint" data-hint="shift"></span>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="f-note">Заметка</label>
+          <textarea class="textarea" id="f-note" name="note" rows="2">${esc(note)}</textarea>
+        </div>
+
+        <div class="field">
+          <span class="field__label">Расчётка</span>
+          <button class="btn btn--block" type="button" disabled>Прикрепить расчётку</button>
+          <span class="field__hint">Загрузка расчётных листков появится на следующем шаге.</span>
+        </div>
+
+        <div class="form__actions">
+          <button class="btn btn--primary btn--block" type="submit">${editing ? 'Сохранить' : 'Добавить поступление'}</button>
+          ${editing ? `<button class="btn btn--danger btn--block" type="button" data-act="income-delete" data-id="${editing.id}">Удалить поступление</button>` : ''}
+        </div>
+      </form>`,
+    after: (root) => {
+      const amountInput = root.querySelector('#f-amount');
+      const amountHint = root.querySelector('[data-hint="amount"]');
+      const dateInput = root.querySelector('#f-date');
+      const shiftSelect = root.querySelector('#f-shift');
+      const shiftHint = root.querySelector('[data-hint="shift"]');
+
+      // живая подсказка: видно, какая сумма получится
+      const updateAmountHint = () => {
+        const parsed = parseAmount(amountInput.value);
+        amountHint.textContent = !amountInput.value
+          ? 'Только целые рубли, без копеек'
+          : parsed.error ? 'Введите целое число, например 50000' : `Получится ${rubles(parsed.value)}`;
+      };
+      amountInput.addEventListener('input', updateAmountHint);
+      updateAmountHint();
+
+      // «дата вне периода вахты» — это подсказка, а не ошибка: расчёт могут задержать
+      const updateShiftHint = () => {
+        const shift = state.shifts.find((item) => String(item.id) === shiftSelect.value);
+        if (!shift || !D.isValidKey(dateInput.value)) {
+          shiftHint.textContent = '';
+          return;
+        }
+        const outside = D.diffDays(shift.arrival, dateInput.value) < 0 || D.diffDays(dateInput.value, shift.workEnd) < 0;
+        shiftHint.textContent = outside ? `Дата вне периода вахты (${D.formatRange(shift.arrival, shift.workEnd)})` : '';
+        shiftHint.classList.toggle('warn', outside);
+      };
+      dateInput.addEventListener('change', updateShiftHint);
+      shiftSelect.addEventListener('change', updateShiftHint);
+      updateShiftHint();
+    },
+  };
+}
+
+async function saveIncome(form) {
+  clearFieldErrors();
+  const raw = {
+    amount: form.elements.amount.value.trim(),
+    date: form.elements.date.value.trim(),
+    category: form.elements.category.value,
+    shiftId: form.elements.shiftId.value,
+    note: form.elements.note.value.trim(),
+  };
+
+  const parsed = parseAmount(raw.amount);
+  const errors = {};
+  if (parsed.error) errors.amount = parsed.error;
+  if (!D.isValidKey(raw.date)) errors.date = 'Укажите дату';
+
+  if (Object.keys(errors).length) {
+    for (const [field, message] of Object.entries(errors)) setFieldError(field, message);
+    toast('Проверьте поля', 'error');
+    return;   // введённое остаётся в форме
+  }
+
+  const record = {
+    shiftId: raw.shiftId === '' ? null : Number(raw.shiftId),
+    amount: parsed.value,
+    date: raw.date,
+    category: raw.category,
+    note: raw.note,
+  };
+
+  try {
+    const editingId = form.dataset.id ? Number(form.dataset.id) : null;
+    if (editingId) {
+      const existing = state.incomes.find((income) => income.id === editingId);
+      await db.updateIncome({ ...existing, ...record });
+    } else {
+      await db.addIncome(record);
+    }
+    await db.markDirty();
+    await reload();
+    back();
+    render();
+    toast(editingId ? 'Поступление сохранено' : 'Поступление добавлено', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось сохранить', 'error');
+  }
+}
+
+async function deleteIncome(id) {
+  const income = state.incomes.find((item) => item.id === id);
+  if (!income) return;
+
+  let stats = { attachments: 0 };
+  try {
+    stats = await db.incomeDeleteStats(id);
+  } catch (error) {
+    console.error(error);
+  }
+
+  const answer = await openSheet({
+    title: 'Удалить поступление?',
+    message: `${rubles(income.amount)} от ${D.formatDate(income.date)}${stats.attachments
+      ? `\nВложения (${countText(stats.attachments, ['файл', 'файла', 'файлов'])}) будут удалены вместе с ним.` : ''}`,
+    confirmText: 'Удалить',
+    danger: true,
+  });
+  if (answer !== 'ok') return;
+
+  try {
+    await db.deleteIncomeCascade(id);
+    await db.markDirty();
+    await reload();
+    if (state.stack.length && state.stack[state.stack.length - 1].name === 'incomeForm') state.stack.pop();
+    render();
+    toast('Поступление удалено', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось удалить', 'error');
+  }
+}
+
 /* ═══════════════════════════ разделы следующих шагов ═══════════════════════════ */
 
 function soonView(title, text) {
@@ -715,8 +1086,23 @@ function onClick(event) {
   if (act === 'shift-edit') { push('shiftForm', { id: Number(target.dataset.id) }); return; }
   if (act === 'shift-delete') { deleteShift(Number(target.dataset.id)); return; }
   if (act === 'toggle-amounts') { toggleAmounts(); return; }
+  if (act === 'income-new') { push('incomeForm', {}); return; }
+  if (act === 'income-edit') { push('incomeForm', { id: Number(target.dataset.id) }); return; }
+  if (act === 'income-delete') { deleteIncome(Number(target.dataset.id)); return; }
+  if (act === 'filter-reset') {
+    state.incomeFilter = { category: 'all', shift: 'all' };
+    render();
+    return;
+  }
   if (act === 'open-shifts') { state.tab = 'more'; push('shifts', {}); return; }
   if (act === 'apply-update') { applyUpdate(); return; }
+}
+
+function onChange(event) {
+  const field = event.target.closest('[data-act="filter"]');
+  if (!field) return;
+  state.incomeFilter[field.dataset.filter] = field.value;
+  render();
 }
 
 function onSubmit(event) {
@@ -725,11 +1111,12 @@ function onSubmit(event) {
   if (!act) return;
   event.preventDefault();
   if (act === 'shift-save') saveShift(form);
+  if (act === 'income-save') saveIncome(form);
 }
 
 /* ═══════════════════════════ service worker и обновление ═══════════════════════════ */
 
-const SW_VERSION = 'v1';   // при изменении файлов приложения поднимаем вместе с sw.js
+const SW_VERSION = 'v2';   // при изменении файлов приложения поднимаем вместе с sw.js
 
 async function initServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
@@ -784,7 +1171,8 @@ async function applyUpdate() {
 
 const VIEWS = {
   home: homeView,
-  incomes: () => soonView('Поступления', 'Раздел «Поступления» собирается на следующем шаге: сумма, дата, категория, привязка к вахте и итоги.'),
+  incomes: incomesView,
+  incomeForm: incomeFormView,
   expenses: () => soonView('Расходы', 'Раздел «Расходы» появится после поступлений и вложений.'),
   more: moreView,
   shifts: shiftsView,
@@ -795,6 +1183,7 @@ const VIEWS = {
 
 document.addEventListener('click', onClick);
 document.addEventListener('submit', onSubmit);
+document.addEventListener('change', onChange);
 
 // системная кнопка «назад» (жест «свайп от края») — по возможности закрываем подэкран, а не приложение
 window.addEventListener('popstate', () => {

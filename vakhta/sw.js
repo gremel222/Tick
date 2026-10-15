@@ -14,7 +14,7 @@
  * Как выпустить новую версию: поменять CACHE_VERSION (и SW_VERSION в app.js).
  */
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE = `vakhta-${CACHE_VERSION}`;
 
 // пути считаем от адреса самого sw.js — поэтому подпапка GitHub Pages учитывается сама

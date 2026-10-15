@@ -329,7 +329,7 @@ a { color: var(--accent); }
 .item__date { color: var(--muted); font-size: 13px; font-family: var(--mono); }
 .item__meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
 .item__actions { display: flex; gap: 8px; margin-top: 4px; }
-.item__actions .btn { flex: 1; min-height: 40px; font-size: 14px; }
+.item__actions .btn { flex: 1; min-height: 44px; font-size: 14px; }
 .item__note { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 
 /* пустое состояние */
@@ -337,6 +337,38 @@ a { color: var(--accent); }
 .empty__icon { width: 56px; height: 56px; color: var(--dim); }
 .empty h2 { font-size: 18px; }
 .empty p { color: var(--muted); font-size: 14px; max-width: 30ch; }
+
+/* ─────────────────────────── фильтры и итоги ─────────────────────────── */
+/* На iPhone фильтры стоят друг под другом, на экране пошире — в две колонки. */
+.filters { display: grid; gap: 10px; }
+.filters .field { min-width: 0; }        /* иначе длинные подписи растягивают колонку */
+.filters .select { min-height: 46px; }
+.filters__reset { margin-top: 8px; }
+
+@media (min-width: 420px) {
+  .filters { grid-template-columns: 1fr 1fr; }
+}
+
+/* дополнительный отступ у разделителя внутри карточек */
+.divider--gap { margin: 12px 0; }
+
+/* скрепка с числом вложений */
+.attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.attach svg { width: 15px; height: 15px; }
+
+/* кнопка «добавить» — над нижними вкладками, всегда под рукой */
+.add-bar {
+  position: sticky;
+  bottom: calc(var(--nav-h) + var(--sa-bottom) + 8px);
+  z-index: 5;
+}
 
 /* ─────────────────────────── формы ─────────────────────────── */
 .field { display: grid; gap: 6px; }
@@ -402,14 +434,14 @@ a { color: var(--accent); }
 
 .banner--warn { border-color: rgba(255, 122, 0, 0.45); }
 .banner__actions { display: flex; gap: 8px; margin-left: auto; }
-.banner .btn { min-height: 36px; padding: 0 12px; font-size: 14px; }
+.banner .btn { min-height: 44px; padding: 0 14px; font-size: 15px; }
 
 /* всплывающее сообщение снизу */
 .toast-root {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(var(--nav-h) + var(--sa-bottom) + 16px);
+  bottom: calc(var(--nav-h) + var(--sa-bottom) + 74px);
   z-index: 60;
   display: grid;
   gap: 8px;
