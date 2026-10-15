@@ -479,6 +479,61 @@ a { color: var(--accent); }
 
 html.viewer-open { overflow: hidden; }
 
+/* ─────────────────────────── строки-переходы («Ещё») ─────────────────────────── */
+.item--row { padding: 0; }
+.nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 0 var(--pad);
+  text-align: left;
+}
+.nav-row:active { background: #22252A; }
+.nav-row__left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.nav-row__icon { display: grid; place-items: center; color: var(--accent); }
+.nav-row__icon svg { width: 22px; height: 22px; }
+.nav-row__right { display: flex; align-items: center; gap: 6px; }
+.nav-row__chevron { color: var(--dim); display: grid; place-items: center; }
+.nav-row__chevron svg { width: 18px; height: 18px; }
+
+/* ─────────────────────────── таблица и график ─────────────────────────── */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table th, .table td { padding: 8px 6px; text-align: right; white-space: nowrap; }
+.table th:first-child, .table td:first-child { text-align: left; }
+.table thead th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--line);
+}
+.table tbody tr + tr td { border-top: 1px solid var(--line); }
+.table tbody td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.table .chip { font-size: 11px; min-height: 20px; padding: 0 6px; margin-left: 4px; }
+
+.chart-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.chart { display: block; }
+.chart__value { font-size: 9px; fill: var(--muted); font-family: var(--mono); }
+.chart__label { font-size: 9px; fill: var(--dim); font-family: var(--mono); }
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+.dot--accent { background: var(--accent); }
+.dot--warn { background: var(--warn); }
+
 /* ─────────────────────────── формы ─────────────────────────── */
 .field { display: grid; gap: 6px; }
 .field__label { font-size: 13px; color: var(--muted); }

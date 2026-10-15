@@ -232,11 +232,19 @@ export async function listCategories() {
   return list.sort((a, b) => (a.order || 0) - (b.order || 0) || String(a.name).localeCompare(String(b.name), 'ru'));
 }
 
-/** Добавить категорию. */
+/**
+ * Добавить категорию.
+ * id строковый: «прочее» и стартовые категории имеют зафиксированные id,
+ * поэтому автонумерацию здесь не используем. Возвращает id новой категории.
+ */
 export async function addCategory(name) {
   const list = await listCategories();
-  const maxOrder = list.reduce((max, c) => (c.fixed ? max : Math.max(max, c.order || 0)), 0);
-  return put('categories', { name: String(name).trim(), order: maxOrder + 1, fixed: false });
+  const maxOrder = list.reduce((max, category) => (category.fixed ? max : Math.max(max, category.order || 0)), 0);
+  const id = typeof crypto !== 'undefined' && crypto.randomUUID
+    ? `cat-${crypto.randomUUID()}`
+    : `cat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await put('categories', { id, name: String(name).trim(), order: maxOrder + 1, fixed: false });
+  return id;
 }
 
 /** Переименовать категорию («прочее» переименовать нельзя). */
@@ -370,6 +378,36 @@ export function deleteIncomeCascade(id) {
       incomes.delete(id);
     };
   });
+}
+
+/* ─────────────────────────── расходы ─────────────────────────── */
+
+/** Все расходы: сначала новые (как и поступления — по дате, потом по порядку добавления). */
+export async function listExpenses() {
+  const list = await getAll('expenses');
+  return list.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id));
+}
+
+/** Создать расход. categoryId — id категории, shiftId — id вахты или null («Без вахты»). */
+export function addExpense({ shiftId = null, amount, date, categoryId, note = '' }) {
+  return put('expenses', { shiftId, amount, date, categoryId, note });
+}
+
+/** Изменить расход. */
+export function updateExpense(expense) {
+  return put('expenses', expense);
+}
+
+/** Удалить расход. */
+export function deleteExpense(id) {
+  return remove('expenses', id);
+}
+
+/** Сколько расходов и на какую сумму привязано к категории (для текста подтверждения). */
+export async function categoryUsage(categoryId) {
+  const list = await getAll('expenses');
+  const own = list.filter((expense) => expense.categoryId === categoryId);
+  return { count: own.length, total: own.reduce((total, expense) => total + (Number(expense.amount) || 0), 0) };
 }
 
 /* ─────────────────────────── вложения ─────────────────────────── */

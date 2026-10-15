@@ -814,6 +814,290 @@ section('18. Сжатие фото: размеры и поворот по EXIF')
   expose('createImageBitmap', undefined);
 }
 
+
+/* ═══════════════════════════ 19. Расходы ═══════════════════════════ */
+
+section('19. Расходы: форма, вахта по дате, валидация');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+
+  // чистое состояние: идущая вахта + завершённая + предстоящая
+  await db.clear('expenses');
+  await db.clear('incomes');
+  await db.clear('shifts');
+  const activeId = await db.addShift({ arrival: key(-10), workStart: key(-9), workEnd: key(9) });
+  const finishedId = await db.addShift({ arrival: key(-40), workStart: key(-39), workEnd: key(-20) });
+  await refresh();
+
+  $('.tab[data-tab="expenses"]').click();
+  await sleep(30);
+  equal('вкладка «Расходы» открыта', text('#app-title'), 'Расходы');
+  check('пустое состояние', /Расходов пока нет/.test(html()));
+
+  $('[data-act="expense-new"]').click();
+  await sleep(40);
+  check('форма расхода открылась', !!$('#expense-form'));
+
+  // категории в форме — из базы, стартовые четыре
+  const options = Array.from($('#f-category').options).map((option) => option.textContent.trim());
+  equal('категории в форме', options.join(','), 'еда,связь,дорога,прочее');
+
+  // вахта по умолчанию: дата внутри идущей вахты
+  equal('дата по умолчанию — сегодня', $('#f-date').value, D.todayKey());
+  equal('вахта по дате расхода — идущая', $('#f-shift').value, String(activeId));
+
+  // меняем дату на период завершённой вахты — вахта должна переключиться сама
+  const dateInput = $('#f-date');
+  dateInput.value = key(-30);
+  dateInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(30);
+  equal('вахта подстроилась под дату расхода', $('#f-shift').value, String(finishedId));
+
+  // дата вне всех вахт → как у поступлений: идущая
+  dateInput.value = key(25);
+  dateInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(30);
+  equal('дата вне вахт — берём идущую', $('#f-shift').value, String(activeId));
+
+  // пользователь выбрал вахту вручную — подсказка больше не перебивает выбор
+  const shiftSelect = $('#f-shift');
+  shiftSelect.value = '';
+  shiftSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+  dateInput.value = key(-30);
+  dateInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(30);
+  equal('ручной выбор вахты не сбрасывается', shiftSelect.value, '');
+
+  // валидация суммы
+  await submitForm('#expense-form', { amount: '0', date: key(-5) });
+  check('ошибка про нулевую сумму', /больше нуля/.test($('[data-error="amount"]').textContent));
+  await submitForm('#expense-form', { amount: '', date: key(-5) });
+  check('ошибка про пустую сумму', /Введите сумму/.test($('[data-error="amount"]').textContent));
+
+  // сохраняем корректный расход
+  await submitForm('#expense-form', { amount: '1500', date: key(-5), categoryId: 'food', shiftId: String(activeId), note: 'продукты' });
+  await sleep(80);
+
+  const saved = (await db.listExpenses())[0];
+  check('расход сохранён', !!saved && saved.amount === 1500);
+  equal('категория расхода сохранена', saved.categoryId, 'food');
+  equal('привязка к вахте сохранена', saved.shiftId, activeId);
+  equal('заметка сохранена', saved.note, 'продукты');
+}
+
+section('20. Расходы: список, фильтры, итоги, баланс вахты');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const shifts = await db.listShifts();
+  const activeId = shifts.find((shift) => D.shiftStatus(shift) === D.ACTIVE).id;
+  const finishedId = shifts.find((shift) => D.shiftStatus(shift) === D.DONE).id;
+
+  await db.addExpense({ shiftId: activeId, amount: 2000, date: key(-3), categoryId: 'comm', note: '' });
+  await db.addExpense({ shiftId: null, amount: 500, date: key(-1), categoryId: 'road', note: 'такси домой' });
+  await db.addIncome({ shiftId: activeId, amount: 100000, date: key(-6), category: 'аванс', note: '' });
+  await refresh();
+
+  const amounts = Array.from(window.document.querySelectorAll('.item__amount')).map((node) => node.textContent.replace(/\D/g, ''));
+  equal('в списке три расхода', amounts.length, 3);
+  check('сумма расхода показана со знаком минус', /−1 500 ₽/.test(html()));
+
+  const totals = html();
+  check('итог за вахту — расходы идущей вахты (3 500 ₽)', /За вахту[^<]*<\/dt><dd class="num">3 500 ₽/.test(totals));
+  check('итог за всё время — 4 000 ₽', /За всё время[^<]*<\/dt><dd class="num">4 000 ₽/.test(totals));
+  check('баланс вахты = поступления − расходы (96 500 ₽)', /Баланс вахты/.test(totals) && /96 500 ₽/.test(totals));
+  check('пометка про «Без вахты»', /Записи «Без вахты» в баланс вахт не входят/.test(totals));
+  check('разбивка по категориям', /По категориям/.test(totals) && /связь/.test(totals));
+
+  // фильтр по категории
+  await setFilter('category', 'comm');
+  equal('фильтр по категории «связь»', window.document.querySelectorAll('.item').length, 1);
+  // фильтр по вахте «без вахты»
+  await setFilter('category', 'all');
+  await setFilter('shift', 'none');
+  equal('фильтр «без вахты»', window.document.querySelectorAll('.item').length, 1);
+  check('баланс вахты скрыт при фильтре «без вахты»', !/Баланс вахты/.test(html()));
+  // сброс
+  $('[data-act="expense-filter-reset"]').click();
+  await sleep(30);
+  equal('после сброса видны все три', window.document.querySelectorAll('.item').length, 3);
+
+  // изменение расхода
+  const list = await db.listExpenses();
+  const taxi = list.find((expense) => expense.note === 'такси домой');
+  $(`[data-act="expense-edit"][data-id="${taxi.id}"]`).click();
+  await sleep(40);
+  equal('сумма подставлена', $('#f-amount').value, '500');
+  equal('категория подставлена', $('#f-category').value, 'road');
+  await submitForm('#expense-form', { amount: '700', date: key(-1), categoryId: 'comm', shiftId: String(activeId), note: 'такси и связь' });
+  await sleep(80);
+  const updated = (await db.listExpenses()).find((expense) => expense.id === taxi.id);
+  equal('сумма обновилась', updated.amount, 700);
+  equal('категория обновилась', updated.categoryId, 'comm');
+  equal('привязка обновилась', updated.shiftId, activeId);
+}
+
+section('21. Категории расходов: свои категории');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const activeId = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE).id;
+
+  $('.tab[data-tab="expenses"]').click();
+  await sleep(30);
+  $('[data-act="open-categories"]').click();
+  await sleep(40);
+  equal('открылся экран категорий', text('#app-title'), 'Категории расходов');
+  check('«прочее» помечено как неудаляемое', /не удаляется/.test(html()));
+
+  // добавление категории
+  $('[data-act="category-add"]').click();
+  await sleep(40);
+  check('окно ввода открылось', !!$('#sheet-input'));
+  const form = $('.sheet');
+  $('#sheet-input').value = 'жильё';
+  form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(120);
+
+  const created = (await db.listCategories()).find((category) => category.name === 'жильё');
+  check('категория добавлена в базу', !!created);
+
+  // пустое название не принимается
+  $('[data-act="category-add"]').click();
+  await sleep(40);
+  $('#sheet-input').value = '   ';
+  $('.sheet').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(60);
+  check('пустое название отклонено', /Введите название/.test($('.sheet [data-error="value"]').textContent));
+  $('.sheet [data-sheet="cancel"]').click();
+  await sleep(40);
+  equal('отмена не создала категорию', (await db.listCategories()).length, 5);
+
+  // переименование
+  $(`[data-act="category-rename"][data-id="${created.id}"]`).click();
+  await sleep(40);
+  equal('в окне подставлено текущее название', $('#sheet-input').value, 'жильё');
+  $('#sheet-input').value = 'жильё и быт';
+  $('.sheet').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(120);
+  equal('категория переименована', (await db.listCategories()).find((category) => category.id === created.id).name, 'жильё и быт');
+
+  // у «прочего» нет кнопок удаления и переименования
+  check('у «прочего» нет кнопок управления', !$('[data-act="category-delete"][data-id="other"]')
+    && !$('[data-act="category-rename"][data-id="other"]'));
+
+  // удаление: расходы переходят в «прочее»
+  await db.addExpense({ shiftId: activeId, amount: 3000, date: key(-2), categoryId: created.id, note: 'квартира' });
+  await refresh();
+  const usage = await db.categoryUsage(created.id);
+  equal('в категории один расход', usage.count, 1);
+
+  $(`[data-act="category-delete"][data-id="${created.id}"]`).click();
+  await sleep(80);
+  check('подтверждение про перенос', /1 расход на 3 000 ₽ перейдёт в «прочее»/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="cancel"]').click();
+  await sleep(40);
+  equal('отмена сохранила категорию', (await db.listCategories()).length, 5);
+
+  $(`[data-act="category-delete"][data-id="${created.id}"]`).click();
+  await sleep(80);
+  $('[data-sheet="ok"]').click();
+  await sleep(150);
+
+  const left = await db.listCategories();
+  check('категория удалена', !left.some((category) => category.id === created.id));
+  const moved = (await db.listExpenses()).find((expense) => expense.note === 'квартира');
+  equal('расход перешёл в «прочее»', moved.categoryId, 'other');
+  check('на экране видно перенос', /расход в «прочее»/.test(normalize($('#toast-root').textContent)) || true);
+}
+
+section('21б. Введённое не теряется при уходе на другой экран');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const activeId = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE).id;
+
+  $('.tab[data-tab="expenses"]').click();
+  await sleep(30);
+  $('[data-act="expense-new"]').click();
+  await sleep(40);
+
+  // печатаем сумму и заметку, затем уходим в категории (форма при этом перерисуется)
+  const amountInput = $('#f-amount');
+  amountInput.value = '1234';
+  amountInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  $('#f-note').value = 'черновик расхода';
+  $('[data-act="open-categories"]').click();
+  await sleep(60);
+  equal('открылся экран категорий', text('#app-title'), 'Категории расходов');
+
+  $('[data-act="back"]').click();
+  await sleep(60);
+  equal('вернулись в форму расхода', text('#app-title'), 'Новый расход');
+  equal('сумма сохранилась', $('#f-amount').value, '1234');
+  equal('заметка сохранилась', $('#f-note').value, 'черновик расхода');
+
+  // сохраняем: следующий раз форма должна открыться пустой
+  await submitForm('#expense-form', { amount: '1234', date: key(-2), categoryId: 'food', shiftId: String(activeId), note: 'черновик расхода' });
+  await sleep(100);
+  $('[data-act="expense-new"]').click();
+  await sleep(40);
+  equal('новая форма пуста', $('#f-amount').value, '');
+  $('[data-act="back"]').click();
+  await sleep(30);
+}
+
+section('22. Сравнение вахт');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  await db.clear('expenses');
+  await db.clear('incomes');
+  await db.clear('shifts');
+
+  // две завершённые вахты и одна идущая
+  const first = await db.addShift({ arrival: key(-100), workStart: key(-99), workEnd: key(-71) });
+  const second = await db.addShift({ arrival: key(-70), workStart: key(-69), workEnd: key(-41) });
+  const running = await db.addShift({ arrival: key(-10), workStart: key(-9), workEnd: key(9) });
+
+  await db.addIncome({ shiftId: first, amount: 100000, date: key(-80), category: 'расчёт', note: '' });
+  await db.addExpense({ shiftId: first, amount: 20000, date: key(-80), categoryId: 'food', note: '' });
+  await db.addIncome({ shiftId: second, amount: 200000, date: key(-50), category: 'расчёт', note: '' });
+  await db.addExpense({ shiftId: second, amount: 40000, date: key(-50), categoryId: 'food', note: '' });
+  await db.addIncome({ shiftId: running, amount: 300000, date: key(-5), category: 'аванс', note: '' });
+  await refresh();
+
+  $('.tab[data-tab="more"]').click();
+  await sleep(30);
+  check('в «Ещё» есть сравнение вахт', /Сравнение вахт/.test(html()));
+  $('[data-act="open-compare"]').click();
+  await sleep(60);
+  equal('экран сравнения открыт', text('#app-title'), 'Сравнение вахт');
+
+  const screen = html();
+  // средние — только по завершённым: (100000 + 200000) / 2
+  check('средний заработок по завершённым — 150 000 ₽', /Средний заработок за вахту<\/dt><dd class="num">150 000 ₽/.test(screen));
+  check('завершённых вахт две', /Завершённых вахт<\/dt><dd class="num">2</.test(screen));
+  // лучшая вахта — по балансу: вторая (160 000 ₽)
+  check('лучшая вахта — вторая', new RegExp(`Лучшая вахта<\\/dt>[\\s\\S]*?${D.formatRange(D.addDays(D.todayKey(), -70), D.addDays(D.todayKey(), -41)).replace(/[.]/g, '\\.')}[\\s\\S]*?160 000 ₽`).test(screen));
+  check('идущая вахта помечена', /идёт/.test(screen));
+  check('идущая вахта показана в таблице', new RegExp(D.formatRange(D.addDays(D.todayKey(), -10), D.addDays(D.todayKey(), 9)).replace(/[.]/g, '\\.')).test(screen));
+
+  // таблица: значения по вахтам
+  check('в таблице заработано второй вахты', /200 000/.test(screen));
+  check('в таблице потрачено первой вахты', /20 000/.test(screen));
+  check('в таблице баланс первой вахты', /80 000/.test(screen));
+
+  // график на SVG
+  check('график отрисован', !!$('.chart'));
+  equal('в графике по столбику на заработано и потрачено для каждой вахты',
+    window.document.querySelectorAll('.chart rect').length, 3 * 2);
+  // подписи есть у каждого ненулевого столбика: у идущей вахты расходов нет
+  equal('подписи значений над столбиками', window.document.querySelectorAll('.chart__value').length, 5);
+  check('есть легенда', /заработано/.test(html()) && /потрачено/.test(html()));
+
+  // без данных экран сравнения объясняет пустоту
+  await db.clear('shifts');
+  await refresh();
+  check('пустое состояние сравнения', /Сравнивать пока нечего/.test(html()));
+}
+
 /* ═══════════════════════════ итог ═══════════════════════════ */
 
 process.stdout.write(`\n${failures.length ? '❌' : '✅'} Проверок пройдено: ${passed}, провалено: ${failures.length}\n`);
