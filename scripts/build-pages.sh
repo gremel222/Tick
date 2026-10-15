@@ -16,5 +16,12 @@ cp -r blender/data docs/blender/data
 cp blender/index.html blender/sw.js blender/manifest.webmanifest blender/icon.svg docs/blender/
 cp blender/README.md docs/blender/README.md
 
+# Счётчик вахты: статическое приложение (без сборки) — копируем как есть
+rm -rf docs/vakhta
+mkdir -p docs/vakhta
+cp -r vakhta/icons docs/vakhta/icons
+cp vakhta/index.html vakhta/style.css vakhta/app.js vakhta/db.js vakhta/dates.js vakhta/sw.js vakhta/manifest.json docs/vakhta/
+cp vakhta/README.md docs/vakhta/README.md
+
 touch docs/.nojekyll
-echo "docs/ обновлён (игра + академия Blender)"
+echo "docs/ обновлён (игра + академия Blender + счётчик вахты)"
