@@ -1,0 +1,253 @@
+{
+  "dataVersion": 1,
+  "built": "2026-10-15T04:46:09.029Z",
+  "sourceVersion": "5.0",
+  "targetVersion": "5.2",
+  "counts": {
+    "pages": 4197,
+    "manual": 2164,
+    "api": 2033,
+    "terms": 29244,
+    "anchors": 39570,
+    "keys": 2049,
+    "aliases": 8677,
+    "translations": 31375
+  },
+  "sections": [
+    {
+      "id": "getting_started",
+      "ru": "Начало работы",
+      "pages": 16
+    },
+    {
+      "id": "interface",
+      "ru": "Интерфейс пользователя",
+      "pages": 52
+    },
+    {
+      "id": "editors",
+      "ru": "Редакторы",
+      "pages": 199
+    },
+    {
+      "id": "scene_layout",
+      "ru": "Сцены и объекты",
+      "pages": 64
+    },
+    {
+      "id": "modeling",
+      "ru": "Моделирование",
+      "pages": 709
+    },
+    {
+      "id": "sculpt_paint",
+      "ru": "Скульптинг и рисование",
+      "pages": 126
+    },
+    {
+      "id": "grease_pencil",
+      "ru": "Grease Pencil",
+      "pages": 117
+    },
+    {
+      "id": "animation",
+      "ru": "Анимация и риггинг",
+      "pages": 122
+    },
+    {
+      "id": "physics",
+      "ru": "Физика",
+      "pages": 119
+    },
+    {
+      "id": "render",
+      "ru": "Рендеринг",
+      "pages": 294
+    },
+    {
+      "id": "compositing",
+      "ru": "Композитинг",
+      "pages": 151
+    },
+    {
+      "id": "movie_clip",
+      "ru": "Отслеживание движения",
+      "pages": 34
+    },
+    {
+      "id": "video_editing",
+      "ru": "Редактирование видео",
+      "pages": 43
+    },
+    {
+      "id": "files",
+      "ru": "Файлы и система данных",
+      "pages": 29
+    },
+    {
+      "id": "addons",
+      "ru": "Аддоны",
+      "pages": 28
+    },
+    {
+      "id": "advanced",
+      "ru": "Дополнительно",
+      "pages": 31
+    },
+    {
+      "id": "troubleshooting",
+      "ru": "Устранение неполадок",
+      "pages": 29
+    },
+    {
+      "id": "glossary",
+      "ru": "Словарь",
+      "pages": 1
+    },
+    {
+      "id": "api",
+      "ru": "Python API",
+      "pages": 2033
+    }
+  ],
+  "sources": [
+    {
+      "id": "manual",
+      "title": "Blender Reference Manual",
+      "license": "CC BY-SA 4.0",
+      "url": "https://docs.blender.org/manual/en/latest/"
+    },
+    {
+      "id": "api",
+      "title": "Blender Python API Reference",
+      "license": "GPL-2.0-or-later",
+      "url": "https://docs.blender.org/api/current/"
+    },
+    {
+      "id": "ui",
+      "title": "Blender UI translation (locale/po/ru.po)",
+      "license": "GPL-2.0-or-later",
+      "url": "https://projects.blender.org/blender/blender/src/branch/main/locale/po/ru.po"
+    }
+  ],
+  "urls": {
+    "ru": "https://docs.blender.org/manual/ru/latest/",
+    "en": "https://docs.blender.org/manual/en/latest/"
+  },
+  "shards": [
+    {
+      "id": "addons",
+      "file": "docs/addons.json.gz",
+      "pages": 28,
+      "bytes": 55927
+    },
+    {
+      "id": "advanced",
+      "file": "docs/advanced.json.gz",
+      "pages": 31,
+      "bytes": 39800
+    },
+    {
+      "id": "animation",
+      "file": "docs/animation.json.gz",
+      "pages": 122,
+      "bytes": 108055
+    },
+    {
+      "id": "compositing",
+      "file": "docs/compositing.json.gz",
+      "pages": 151,
+      "bytes": 82592
+    },
+    {
+      "id": "editors",
+      "file": "docs/editors.json.gz",
+      "pages": 199,
+      "bytes": 175309
+    },
+    {
+      "id": "files",
+      "file": "docs/files.json.gz",
+      "pages": 29,
+      "bytes": 54711
+    },
+    {
+      "id": "getting_started",
+      "file": "docs/getting_started.json.gz",
+      "pages": 16,
+      "bytes": 27052
+    },
+    {
+      "id": "glossary",
+      "file": "docs/glossary.json.gz",
+      "pages": 1,
+      "bytes": 16083
+    },
+    {
+      "id": "grease_pencil",
+      "file": "docs/grease_pencil.json.gz",
+      "pages": 117,
+      "bytes": 57186
+    },
+    {
+      "id": "interface",
+      "file": "docs/interface.json.gz",
+      "pages": 52,
+      "bytes": 56741
+    },
+    {
+      "id": "modeling",
+      "file": "docs/modeling.json.gz",
+      "pages": 709,
+      "bytes": 400868
+    },
+    {
+      "id": "movie_clip",
+      "file": "docs/movie_clip.json.gz",
+      "pages": 34,
+      "bytes": 28395
+    },
+    {
+      "id": "physics",
+      "file": "docs/physics.json.gz",
+      "pages": 119,
+      "bytes": 84780
+    },
+    {
+      "id": "render",
+      "file": "docs/render.json.gz",
+      "pages": 294,
+      "bytes": 199699
+    },
+    {
+      "id": "scene_layout",
+      "file": "docs/scene_layout.json.gz",
+      "pages": 64,
+      "bytes": 46123
+    },
+    {
+      "id": "sculpt_paint",
+      "file": "docs/sculpt_paint.json.gz",
+      "pages": 126,
+      "bytes": 77694
+    },
+    {
+      "id": "troubleshooting",
+      "file": "docs/troubleshooting.json.gz",
+      "pages": 29,
+      "bytes": 12676
+    },
+    {
+      "id": "video_editing",
+      "file": "docs/video_editing.json.gz",
+      "pages": 43,
+      "bytes": 29918
+    },
+    {
+      "id": "api",
+      "file": "docs/api.json.gz",
+      "pages": 2033,
+      "bytes": 1144037
+    }
+  ]
+}
