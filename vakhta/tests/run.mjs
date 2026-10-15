@@ -7,7 +7,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { JSDOM, VirtualConsole } from 'jsdom';
-import { Blob as NodeBlob } from 'node:buffer';
+import { Blob as NodeBlob, File as NodeFile } from 'node:buffer';
 import 'fake-indexeddb/auto';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -69,10 +69,22 @@ expose('self', window);
 // service worker в тестах не нужен: navigator.serviceWorker отсутствует — так и задумано
 delete window.navigator.serviceWorker;
 
+// jsdom не умеет создавать object URL — подменяем простой заглушкой
+let objectUrlSeq = 0;
+const createdUrls = [];
+window.URL.createObjectURL = (blob) => {
+  const url = `blob:test/${++objectUrlSeq}`;
+  createdUrls.push({ url, blob });
+  return url;
+};
+window.URL.revokeObjectURL = () => {};
+expose('URL', window.URL);
+
 // app.js выполняется ради побочного эффекта (рисует интерфейс и кладёт своё в window.vakhta)
 await import(`${ROOT}app.js?test=${Date.now()}`);
 const D = await import(`${ROOT}dates.js`);
 const db = await import(`${ROOT}db.js`);
+const F = await import(`${ROOT}files.js`);
 const app = window.vakhta;
 
 await sleep(80);   // ждём завершения boot()
@@ -497,7 +509,7 @@ section('11. Поступления: изменение, вложения, уд�
   const attachmentId = await db.put('attachments', { incomeId: updated.id, shiftId: updated.shiftId, name: 'расчётка.jpg', type: 'image/jpeg', size: 20, blob: new NodeBlob(['x']) });
   await db.updateIncome({ ...updated, attachments: [attachmentId] });
   await refresh();
-  check('скрепка показывает число вложений', $('.attach') && $('.attach').textContent.trim() === '1');
+  check('скрепка показывает число вложений', $('[data-act="open-attachments"]') && /1 файл/.test($('[data-act="open-attachments"]').textContent));
 
   // удаление с подтверждением
   $(`[data-act="income-delete"][data-id="${updated.id}"]`).click();
@@ -530,6 +542,276 @@ section('12. Суммы на главном экране после добавл
   const screen = html();
   check('за вахту — только поступления идущей вахты (80 000 ₽)', /80 000 ₽/.test(screen));
   check('всего — все поступления (350 000 ₽)', /350 000 ₽/.test(screen));
+}
+
+
+/* ═══════════════════════════ 13. Вложения: проверка файлов ═══════════════════════════ */
+
+section('13. Вложения: правила и проверка файлов');
+{
+  equal('размер по-человечески: килобайты', F.humanSize(1536), '2 КБ');
+  equal('размер по-человечески: мегабайты', F.humanSize(10 * 1024 * 1024), '10,0 МБ');
+  check('определение фото', F.isImage('image/jpeg') && !F.isImage('application/pdf'));
+  check('определение PDF', F.isPdf('application/pdf') && !F.isPdf('image/png'));
+
+  const pdf = (bytes) => ({ name: 'чек.pdf', type: 'application/pdf', size: bytes });
+  const photo = (bytes) => ({ name: 'фото.jpg', type: 'image/jpeg', size: bytes });
+
+  check('обычный PDF принимается', F.validateFile(pdf(1024 * 1024), 0).ok === true);
+  check('PDF ровно 10 МБ принимается', F.validateFile(pdf(10 * 1024 * 1024), 0).ok === true);
+  equal('PDF больше 10 МБ отклоняется', F.validateFile(pdf(10 * 1024 * 1024 + 1), 0).error,
+    'PDF больше 10,0 МБ — выберите файл поменьше');
+  check('фото принимается', F.validateFile(photo(3 * 1024 * 1024), 0).ok === true);
+  equal('чужой тип отклоняется', F.validateFile({ name: 'a.zip', type: 'application/zip', size: 10 }, 0).error,
+    'Поддерживаются только фото и PDF');
+  equal('11-й файл не вмещается', F.validateFile(photo(1000), 10).error,
+    'К поступлению можно прикрепить не больше 10 файлов');
+}
+
+section('14. Вложения: EXIF-ориентация');
+{
+  /** Собираем минимальный JPEG с EXIF-ориентацией. */
+  const jpegWithOrientation = (orientation) => {
+    const bytes = [];
+    const push16 = (value) => bytes.push((value >> 8) & 0xff, value & 0xff);
+    const push32 = (value) => bytes.push((value >> 24) & 0xff, (value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff);
+
+    bytes.push(0xff, 0xd8);                       // SOI
+    bytes.push(0xff, 0xe1);                       // APP1
+    const app1Size = 2 + 6 + 8 + 2 + 12 + 4;      // размер блока APP1
+    push16(app1Size);
+    for (const char of 'Exif\0\0') bytes.push(char.charCodeAt(0));
+    bytes.push(0x4d, 0x4d);                       // 'MM' — big-endian
+    push16(0x002a);
+    push32(8);                                    // смещение IFD0 от TIFF-заголовка
+    push16(1);                                    // одна запись
+    push16(0x0112);                               // тег Orientation
+    push16(3);                                    // тип SHORT
+    push32(1);                                    // количество значений
+    push16(orientation);                          // само значение
+    push16(0);                                    // выравнивание
+    push32(0);                                    // следующей IFD нет
+    bytes.push(0xff, 0xd9);                       // EOI
+    return new NodeBlob([new Uint8Array(bytes)], { type: 'image/jpeg' });
+  };
+
+  equal('ориентация 6 читается', await F.readExifOrientation(jpegWithOrientation(6)), 6);
+  equal('ориентация 8 читается', await F.readExifOrientation(jpegWithOrientation(8)), 8);
+  equal('не JPEG — считаем как есть', await F.readExifOrientation(new NodeBlob(['просто текст'])), 1);
+  equal('PNG — считаем как есть', await F.readExifOrientation(new NodeBlob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])])), 1);
+  equal('битый JPEG не ломает чтение', await F.readExifOrientation(new NodeBlob([new Uint8Array([0xff, 0xd8, 0xff, 0xe1, 0x00])])), 1);
+}
+
+section('15. Вложения: прикрепление PDF к поступлению');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const active = (await db.listShifts()).find((shift) => D.shiftStatus(shift) === D.ACTIVE);
+
+  await db.clear('attachments');
+  await refresh();
+
+  $('.tab[data-tab="incomes"]').click();
+  await sleep(30);
+  $('[data-act="income-new"]').click();
+  await sleep(40);
+
+  check('блок вложений есть в форме', !!$('#attach-list'));
+  check('подсказка про лимиты', /До 10 файлов/.test(normalize($('[data-hint="attach"]').textContent)));
+  check('в списке вложений пусто', /Пока ничего не прикреплено/.test(html()));
+
+  // выбираем PDF через настоящий input[type=file]
+  const pdfFile = new NodeFile([new Uint8Array(2048)], 'расчётка.pdf', { type: 'application/pdf' });
+  const input = $('#file-gallery');
+  Object.defineProperty(input, 'files', { value: [pdfFile], configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(120);
+
+  check('PDF появился в списке вложений', window.document.querySelectorAll('.attach-item').length === 1);
+  check('видно имя файла', /расчётка.pdf/.test($('.attach-item__name').textContent));
+  check('видно размер', /2 КБ/.test($('.attach-item').textContent.replace(/\s+/g, ' ')));
+
+  // сохраняем поступление с вложением
+  await submitForm('#income-form', { amount: '45000', date: key(-1), category: 'расчёт', shiftId: String(active.id), note: '' });
+  await sleep(200);
+
+  const incomes = await db.listIncomes();
+  const saved = incomes.find((income) => income.amount === 45000);
+  check('поступление сохранено', !!saved);
+  equal('к поступлению привязан один файл', (saved.attachments || []).length, 1);
+
+  const attachments = await db.getAll('attachments');
+  equal('вложение записано в базу', attachments.length, 1);
+  equal('имя файла сохранено', attachments[0].name, 'расчётка.pdf');
+  equal('тип файла сохранён', attachments[0].type, 'application/pdf');
+  check('файл лежит как blob', attachments[0].blob && typeof attachments[0].blob.size === 'number');
+  equal('вложение связано с поступлением', attachments[0].incomeId, saved.id);
+
+  // скрепка в списке
+  const badge = $('[data-act="open-attachments"]');
+  check('скрепка показывает один файл', !!badge && /1/.test(badge.textContent));
+  check('скрепка — это кнопка просмотра', !!badge && badge.dataset.id === String(saved.id));
+}
+
+section('16. Вложения: просмотр, зум и удаление');
+{
+  const income = (await db.listIncomes()).find((item) => (item.attachments || []).length);
+
+  $('[data-act="open-attachments"]').click();
+  await sleep(200);
+  check('просмотрщик открылся', !!$('.viewer'));
+  check('показан PDF во фрейме', !!$('.viewer__pdf'));
+  check('в заголовке имя файла', /расчётка.pdf/.test($('#viewer-title').textContent));
+  check('есть ссылка «открыть в новой вкладке»', $('#viewer-open').href.startsWith('blob:'));
+
+  // удаление через подтверждение
+  $('[data-viewer="delete"]').click();
+  await sleep(80);
+  check('спрашивается подтверждение', /Удалить вложение\?/.test($('.sheet h2').textContent));
+  $('[data-sheet="cancel"]').click();
+  await sleep(60);
+  equal('отмена сохранила вложение', (await db.getAll('attachments')).length, 1);
+
+  $('[data-viewer="delete"]').click();
+  await sleep(80);
+  $('[data-sheet="ok"]').click();
+  await sleep(200);
+  check('после удаления просмотрщик закрылся', !$('.viewer'));
+  equal('вложение удалено из базы', (await db.getAll('attachments')).length, 0);
+
+  const after = (await db.listIncomes()).find((item) => item.id === income.id);
+  equal('ссылка на файл убрана из поступления', (after.attachments || []).length, 0);
+  check('скрепка этого поступления стала серой', !!$('.attach--off'));
+}
+
+section('17. Вложения: лимит файлов и фото');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+
+  $('[data-act="income-new"]').click();
+  await sleep(40);
+
+  // десять файлов — можно, одиннадцатый — нет
+  const makePhoto = (index) => new NodeFile([new Uint8Array(1024)], `фото-${index}.jpg`, { type: 'image/jpeg' });
+  const input = $('#file-gallery');
+  Object.defineProperty(input, 'files', { value: Array.from({ length: 10 }, (unused, index) => makePhoto(index)), configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  equal('прикрепилось десять файлов', window.document.querySelectorAll('.attach-item').length, 10);
+
+  const extra = new NodeFile([new Uint8Array(1024)], 'лишний.jpg', { type: 'image/jpeg' });
+  Object.defineProperty(input, 'files', { value: [extra], configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  equal('одиннадцатый файл не добавился', window.document.querySelectorAll('.attach-item').length, 10);
+  check('показано понятное сообщение', /не больше 10 файлов/.test($('[data-error="attach"]').textContent));
+
+  // фото без canvas (как в jsdom) сохраняется как есть — проверяем сам путь
+  const photo = await F.prepareAttachment(new NodeFile([new Uint8Array(4096)], 'чек.jpg', { type: 'image/jpeg' }));
+  check('фото не потеряно, даже если сжать не удалось', photo.size > 0 && !!photo.blob);
+  equal('имя фото сохранено', photo.name, 'чек.jpg');
+
+  // убираем файлы из формы без сохранения
+  $('[data-act="remove-attachment"]').click();
+  await sleep(30);
+  equal('файл убран крестиком', window.document.querySelectorAll('.attach-item').length, 9);
+  $('[data-act="back"]').click();
+  await sleep(30);
+  equal('после выхода из формы вложений не появилось', (await db.getAll('attachments')).length, 0);
+}
+
+
+/* ═══════════════════════════ 18. Сжатие фото (с подменой canvas) ═══════════════════════════ */
+
+section('18. Сжатие фото: размеры и поворот по EXIF');
+{
+  /** Подменяем canvas и Image: настоящий canvas в jsdom недоступен. */
+  const canvasCalls = [];
+  window.HTMLCanvasElement.prototype.getContext = function () {
+    const canvas = this;
+    const ctx = {
+      save() {}, restore() {},
+      scale(x, y) { canvas.__calls.push(['scale', +x.toFixed(4), +y.toFixed(4)]); },
+      transform(a, b, c, d, e, f) { canvas.__calls.push(['transform', a, b, c, d, e, f]); },
+      drawImage() { canvas.__calls.push(['drawImage']); },
+    };
+    return ctx;
+  };
+  window.HTMLCanvasElement.prototype.toBlob = function (callback, type, quality) {
+    canvasCalls.push({ width: this.width, height: this.height, type, quality, calls: this.__calls });
+    callback(new NodeBlob([new Uint8Array(16)], { type }));
+  };
+  const makeCanvas = () => {
+    const canvas = window.document.createElement('canvas');
+    canvas.__calls = [];
+    return canvas;
+  };
+  // запоминаем все созданные canvas, чтобы посмотреть их параметры
+  const originalCreateElement = window.document.createElement.bind(window.document);
+  window.document.createElement = (tag, ...rest) => {
+    const node = originalCreateElement(tag, ...rest);
+    if (String(tag).toLowerCase() === 'canvas' && node.__calls === undefined) node.__calls = [];
+    return node;
+  };
+
+  // 1) браузер сам применяет EXIF (createImageBitmap с imageOrientation)
+  expose('createImageBitmap', async (blob, options) => {
+    checkBitmapOptions = options;
+    return { width: 4032, height: 3024, close() {} };
+  });
+  let checkBitmapOptions = null;
+
+  const landscape = await F.compressImage(new NodeFile([new Uint8Array(64)], 'photo.jpg', { type: 'image/jpeg' }));
+  check('createImageBitmap вызывается с учётом EXIF',
+    checkBitmapOptions && checkBitmapOptions.imageOrientation === 'from-image');
+  check('фото сжато', !!landscape && !!landscape.photo);
+
+  const photo = canvasCalls.find((call) => call.width >= 320 && call.width !== 320) || canvasCalls[0];
+  equal('длинная сторона ровно 1600 px', photo.width, 1600);
+  equal('вторая сторона по пропорции', photo.height, 1200);
+  equal('формат JPEG', photo.type, 'image/jpeg');
+  equal('качество 0.8', photo.quality, 0.8);
+
+  const thumbCall = canvasCalls.find((call) => Math.max(call.width, call.height) === 320);
+  check('миниатюра сделана', !!thumbCall);
+  equal('качество миниатюры 0.7', thumbCall.quality, 0.7);
+
+  // 2) старый браузер: без createImageBitmap, поворот делаем сами по EXIF
+  canvasCalls.length = 0;
+  expose('createImageBitmap', undefined);
+  const originalImage = window.Image;
+  expose('Image', function FakeImage() {
+    // как у снимка с iPhone: матрица горизонтальная 4032×3024,
+    // а EXIF-ориентация 6 говорит «повернуть на 90°» — значит на экране портрет
+    this.naturalWidth = 4032;
+    this.naturalHeight = 3024;
+    setTimeout(() => this.onload && this.onload(), 0);
+    Object.defineProperty(this, 'src', { set(value) { void value; }, get() { return 'blob:test'; } });
+  });
+
+  const jpeg6 = (() => {
+    const bytes = [];
+    const push16 = (value) => bytes.push((value >> 8) & 0xff, value & 0xff);
+    const push32 = (value) => bytes.push((value >> 24) & 0xff, (value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff);
+    bytes.push(0xff, 0xd8, 0xff, 0xe1);
+    push16(2 + 6 + 8 + 2 + 12 + 4);
+    for (const char of 'Exif\0\0') bytes.push(char.charCodeAt(0));
+    bytes.push(0x4d, 0x4d); push16(0x002a); push32(8); push16(1);
+    push16(0x0112); push16(3); push32(1); push16(6); push16(0); push32(0);
+    bytes.push(0xff, 0xd9);
+    return new NodeFile([new Uint8Array(bytes)], 'повёрнутое.jpg', { type: 'image/jpeg' });
+  })();
+
+  const rotated = await F.compressImage(jpeg6);
+  check('фото обработано запасным путём', !!rotated && !!rotated.photo);
+  const rotatedPhoto = canvasCalls.find((call) => call.type === 'image/jpeg' && call.quality === 0.8);
+  equal('поворот 90°: фото стало портретным — ширина', rotatedPhoto.width, 1200);
+  equal('поворот 90°: фото стало портретным — высота', rotatedPhoto.height, 1600);
+  check('применена матрица поворота на 90° по часовой',
+    rotatedPhoto.calls.some((call) => call[0] === 'transform' && call[1] === 0 && call[2] === 1 && call[3] === -1 && call[4] === 0),
+    JSON.stringify(rotatedPhoto.calls));
+
+  expose('Image', originalImage);
+  expose('createImageBitmap', undefined);
 }
 
 /* ═══════════════════════════ итог ═══════════════════════════ */

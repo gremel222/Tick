@@ -372,6 +372,39 @@ export function deleteIncomeCascade(id) {
   });
 }
 
+/* ─────────────────────────── вложения ─────────────────────────── */
+
+/** Вложения конкретного поступления, в порядке добавления. */
+export async function listAttachments(incomeId) {
+  const list = await getAllBy('attachments', 'incomeId', incomeId);
+  return list.sort((a, b) => a.id - b.id);
+}
+
+/** Одно вложение целиком (с файлом) — нужно для просмотра. */
+export function getAttachment(id) {
+  return get('attachments', id);
+}
+
+/** Создать вложение. Возвращает id. */
+export function addAttachment(record) {
+  return put('attachments', record);
+}
+
+/** Удалить вложение и убрать его из списка у поступления. */
+export function deleteAttachmentCascade(incomeId, attachmentId) {
+  return run(['attachments', 'incomes'], 'readwrite', (attachments, incomes) => {
+    attachments.delete(attachmentId);
+    if (incomeId == null) return;
+    const request = incomes.get(incomeId);
+    request.onsuccess = () => {
+      const income = request.result;
+      if (!income) return;
+      const left = (income.attachments || []).filter((id) => id !== attachmentId);
+      incomes.put({ ...income, attachments: left });
+    };
+  });
+}
+
 /* ─────────────────────────── запуск хранилища ─────────────────────────── */
 
 /**

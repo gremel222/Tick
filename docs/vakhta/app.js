@@ -13,6 +13,7 @@
 
 import * as db from './db.js';
 import * as D from './dates.js';
+import * as F from './files.js';
 
 /* ═══════════════════════════ состояние ═══════════════════════════ */
 
@@ -25,6 +26,9 @@ const state = {
   categories: [],
   settings: {},
   incomeFilter: { category: 'all', shift: 'all' },   // фильтры списка поступлений
+  attachmentForm: null,     // вложения в открытой форме поступления
+  viewer: null,             // открытый просмотрщик вложения
+  busy: false,              // идёт обработка выбранных файлов
   amountsVisible: false,    // показаны ли суммы на главном экране (между запусками не храним)
   amountsTimer: null,
   midnightTimer: null,
@@ -102,6 +106,10 @@ const ICON = {
   shift: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   empty: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M9 15h6"/></svg>',
   paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5 12.3 19.2a4.5 4.5 0 0 1-6.4-6.4l8-8a3 3 0 0 1 4.3 4.3l-8 8a1.5 1.5 0 0 1-2.1-2.1l7.3-7.3"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>',
+  pdf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h1.5a1.5 1.5 0 0 1 0 3H9v-3zm0 0v5"/></svg>',
+  photo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 5-4 4 3 3-2 4 3"/></svg>',
 };
 
 /* ═══════════════════════════ запуск ═══════════════════════════ */
@@ -195,9 +203,22 @@ function push(name, params = {}) {
 }
 
 function back() {
-  state.stack.pop();
+  const leaving = state.stack.pop();
+  if (leaving && leaving.name === 'incomeForm') releaseAttachmentForm();
   window.scrollTo(0, 0);
   render();
+}
+
+/** Освобождает память формы вложений (ссылки на превью больше не нужны). */
+function releaseAttachmentForm() {
+  const form = state.attachmentForm;
+  if (form) {
+    for (const entry of form.entries) {
+      if (entry.pending && entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+      if (!entry.pending && entry.thumbUrl) URL.revokeObjectURL(entry.thumbUrl);
+    }
+  }
+  state.attachmentForm = null;
 }
 
 function currentRoute() {
@@ -698,11 +719,17 @@ function filteredIncomes() {
   });
 }
 
-/** Скрепка с числом вложений (показываем, только если вложения есть). */
+/**
+ * Скрепка с числом вложений. Нажатие открывает просмотр расчёток;
+ * если вложений нет — показываем просто серую иконку.
+ */
 function attachBadge(income) {
   const count = (income.attachments || []).length;
-  if (!count) return '';
-  return `<span class="attach">${ICON.paperclip}<span>${count}</span></span>`;
+  if (!count) return `<span class="attach attach--off">${ICON.paperclip}</span>`;
+  const text = count === 1 ? '1 файл' : `${count} файла`;
+  return `<button class="attach" data-act="open-attachments" data-id="${income.id}"
+    aria-label="Открыть вложения: ${count}">${ICON.paperclip}<span>${count}</span>
+    <span class="attach__text">${text}</span></button>`;
 }
 
 function incomesView() {
@@ -884,8 +911,16 @@ function incomeFormView(params) {
 
         <div class="field">
           <span class="field__label">Расчётка</span>
-          <button class="btn btn--block" type="button" disabled>Прикрепить расчётку</button>
-          <span class="field__hint">Загрузка расчётных листков появится на следующем шаге.</span>
+          <ul class="attach-list" id="attach-list" aria-live="polite"></ul>
+          <div class="attach-actions">
+            <button class="btn grow" type="button" data-act="pick-file" data-source="gallery">Галерея / файлы</button>
+            <button class="btn grow" type="button" data-act="pick-file" data-source="camera">Камера</button>
+          </div>
+          <input class="hidden" type="file" id="file-gallery" accept="image/*,application/pdf" multiple>
+          <input class="hidden" type="file" id="file-camera" accept="image/*" capture="environment" multiple>
+          <span class="field__hint" data-hint="attach">До ${F.MAX_FILES} файлов на поступление, PDF — до ${F.humanSize(F.MAX_PDF_BYTES)}.
+            Фото сжимаются автоматически. PDF выбирается в «Галерея / файлы» → «Обзор».</span>
+          <span class="field__error hidden" data-error="attach"></span>
         </div>
 
         <div class="form__actions">
@@ -924,6 +959,9 @@ function incomeFormView(params) {
       dateInput.addEventListener('change', updateShiftHint);
       shiftSelect.addEventListener('change', updateShiftHint);
       updateShiftHint();
+
+      // вложения: подключить выбор файлов и показать уже прикреплённые
+      initAttachmentForm(root, editing ? editing.id : null);
     },
   };
 }
@@ -959,20 +997,27 @@ async function saveIncome(form) {
 
   try {
     const editingId = form.dataset.id ? Number(form.dataset.id) : null;
+    let income;
     if (editingId) {
-      const existing = state.incomes.find((income) => income.id === editingId);
-      await db.updateIncome({ ...existing, ...record });
+      const existing = state.incomes.find((item) => item.id === editingId);
+      income = { ...existing, ...record };
+      await db.updateIncome(income);
     } else {
-      await db.addIncome(record);
+      const id = await db.addIncome(record);
+      income = { ...record, id, attachments: [] };
     }
+    // прикреплённые в форме файлы записываем и связываем с поступлением
+    await savePendingAttachments(income);
     await db.markDirty();
     await reload();
+    state.attachmentForm = null;
     back();
     render();
     toast(editingId ? 'Поступление сохранено' : 'Поступление добавлено', 'ok');
   } catch (error) {
     console.error(error);
-    toast('Не удалось сохранить', 'error');
+    // данные формы и выбранные файлы остаются на месте
+    toast(F.storageErrorMessage(error), 'error');
   }
 }
 
@@ -1007,6 +1052,526 @@ async function deleteIncome(id) {
     console.error(error);
     toast('Не удалось удалить', 'error');
   }
+}
+
+/* ═══════════════════════════ вложения ═══════════════════════════ */
+
+let attachmentSeq = 0;   // сквозной номер для ещё не сохранённых файлов
+
+/**
+ * Готовит список вложений в форме.
+ * Ключ формы не даёт сбросить уже выбранные файлы при перерисовке экрана:
+ *   «нет поступления» — новый документ, «id поступления» — редактирование.
+ */
+async function initAttachmentForm(root, incomeId) {
+  const key = incomeId == null ? 'new' : `income-${incomeId}`;
+  if (!state.attachmentForm || state.attachmentForm.key !== key) {
+    state.attachmentForm = { key, incomeId: incomeId ?? null, entries: [] };
+    if (incomeId != null) {
+      try {
+        const records = await db.listAttachments(incomeId);
+        state.attachmentForm.entries = records.map((record) => ({
+          id: record.id,
+          incomeId,
+          name: record.name,
+          type: record.type,
+          size: record.size,
+          pending: false,
+          thumbUrl: record.thumb ? URL.createObjectURL(record.thumb) : null,
+          status: record.compressed === false && F.isImage(record.type) ? 'без сжатия' : '',
+        }));
+      } catch (error) {
+        console.error(error);
+        toast('Не удалось прочитать вложения', 'error');
+      }
+    }
+  }
+
+  // выбор файлов: галерея/файлы и камера
+  const gallery = root.querySelector('#file-gallery');
+  const camera = root.querySelector('#file-camera');
+  if (gallery) gallery.addEventListener('change', (event) => onFilesPicked(event, 'gallery'));
+  if (camera) camera.addEventListener('change', (event) => onFilesPicked(event, 'camera'));
+
+  renderAttachmentList();
+}
+
+/** Перерисовывает список вложений внутри формы (без полной перерисовки экрана). */
+function renderAttachmentList() {
+  const list = document.querySelector('#attach-list');
+  const form = state.attachmentForm;
+  if (!list || !form) return;
+
+  if (!form.entries.length) {
+    list.innerHTML = '<li class="muted small" style="padding:2px 0">Пока ничего не прикреплено</li>';
+    return;
+  }
+
+  list.innerHTML = form.entries.map((entry) => `
+    <li class="attach-item">
+      <button class="attach-item__open" type="button" data-act="preview-attachment" data-key="${entry.id ?? entry.tempId}">
+        ${entry.thumbUrl && F.isImage(entry.type)
+          ? `<img class="attach-item__thumb" src="${entry.thumbUrl}" alt="">`
+          : `<span class="attach-item__icon">${F.isPdf(entry.type) ? ICON.pdf : ICON.photo}</span>`}
+        <span class="attach-item__info">
+          <span class="attach-item__name truncate">${esc(entry.name)}</span>
+          <span class="muted small">${F.humanSize(entry.size)}${entry.status ? ` · ${esc(entry.status)}` : ''}</span>
+        </span>
+      </button>
+      <button class="icon-btn attach-item__remove" type="button" data-act="remove-attachment"
+        data-key="${entry.id ?? entry.tempId}" aria-label="Убрать файл ${esc(entry.name)}">
+        ${ICON.trash}
+      </button>
+    </li>`).join('');
+}
+
+/** Служебная надпись о состоянии (например, «Обработка фото…»). */
+function setAttachStatus(text, isError = false) {
+  const hint = document.querySelector('[data-hint="attach"]');
+  const error = document.querySelector('[data-error="attach"]');
+  if (error) {
+    error.textContent = isError ? text : '';
+    error.classList.toggle('hidden', !text);
+  }
+  if (hint) hint.classList.toggle('hidden', !!text);
+}
+
+/** Обработка выбранных файлов: проверка → сжатие → добавление в список формы. */
+async function onFilesPicked(event, source) {
+  const picked = Array.from(event.target.files || []);
+  event.target.value = '';            // чтобы можно было выбрать тот же файл ещё раз
+
+  const form = state.attachmentForm;
+  if (!form || !picked.length) return;
+
+  state.busy = true;
+  setAttachStatus(`Обработка ${countText(picked.length, ['файла', 'файлов', 'файлов'])}…`);
+  const problems = [];
+
+  for (const file of picked) {
+    const check = F.validateFile(file, form.entries.length);
+    if (check.error) {
+      problems.push(`${file.name}: ${check.error}`);
+      continue;
+    }
+    try {
+      const prepared = await F.prepareAttachment(file);
+      form.entries.push({
+        tempId: `tmp-${++attachmentSeq}`,
+        incomeId: form.incomeId,
+        pending: true,
+        ...prepared,
+        previewUrl: URL.createObjectURL(prepared.thumb || prepared.blob),
+      });
+    } catch (error) {
+      console.error(error);
+      problems.push(`${file.name}: не удалось обработать`);
+    }
+  }
+
+  state.busy = false;
+  renderAttachmentList();
+
+  if (problems.length) {
+    setAttachStatus(problems.join('; '), true);
+    toast('Часть файлов не добавлена', 'error');
+  } else {
+    setAttachStatus('');
+  }
+  void source;
+}
+
+/** Убирает файл из формы: ещё не сохранённый — сразу, сохранённый — с подтверждением. */
+async function removeAttachment(key) {
+  const form = state.attachmentForm;
+  if (!form) return;
+  const entry = form.entries.find((item) => String(item.id ?? item.tempId) === String(key));
+  if (!entry) return;
+
+  if (entry.pending) {
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    form.entries = form.entries.filter((item) => item !== entry);
+    renderAttachmentList();
+    return;
+  }
+
+  const answer = await openSheet({
+    title: 'Удалить вложение?',
+    message: `${entry.name}\nФайл будет удалён безвозвратно.`,
+    confirmText: 'Удалить',
+    danger: true,
+  });
+  if (answer !== 'ok') return;
+
+  try {
+    await db.deleteAttachmentCascade(entry.incomeId, entry.id);
+    await db.markDirty();
+    if (entry.thumbUrl) URL.revokeObjectURL(entry.thumbUrl);
+    form.entries = form.entries.filter((item) => item !== entry);
+    await reload();               // скрепка в списке поступлений станет меньше
+    renderAttachmentList();
+    updateMoneyBlock();
+    toast('Вложение удалено', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось удалить', 'error');
+  }
+}
+
+/** Записывает подготовленные в форме файлы в базу и связывает их с поступлением. */
+async function savePendingAttachments(income) {
+  const form = state.attachmentForm;
+  if (!form || !form.entries.length) return income;
+
+  const pending = form.entries.filter((entry) => entry.pending);
+  if (!pending.length) return income;
+
+  const ids = [...(income.attachments || [])];
+  for (const entry of pending) {
+    const id = await db.addAttachment({
+      incomeId: income.id,
+      shiftId: income.shiftId ?? null,
+      name: entry.name,
+      type: entry.type,
+      size: entry.size,
+      blob: entry.blob,
+      thumb: entry.thumb || null,
+      compressed: entry.compressed,
+      createdAt: new Date().toISOString(),
+    });
+    if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+    ids.push(id);
+  }
+  const updated = { ...income, attachments: ids };
+  await db.updateIncome(updated);
+  return updated;
+}
+
+/* ── просмотр на весь экран ── */
+
+/** Открыть вложения поступления из списка. */
+async function openIncomeAttachments(incomeId, startIndex = 0) {
+  try {
+    const records = await db.listAttachments(incomeId);
+    if (!records.length) {
+      toast('Вложений нет');
+      return;
+    }
+    openAttachmentViewer(records.map((record) => ({
+      id: record.id,
+      incomeId,
+      name: record.name,
+      type: record.type,
+      size: record.size,
+      blob: record.blob,
+    })), startIndex);
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось открыть вложение', 'error');
+  }
+}
+
+/** Открыть вложения, выбранные в форме (в том числе ещё не сохранённые). */
+function openFormAttachment(key) {
+  const form = state.attachmentForm;
+  if (!form) return;
+  const items = form.entries.map((entry) => ({
+    id: entry.id ?? null,
+    incomeId: entry.pending ? null : entry.incomeId,
+    name: entry.name,
+    type: entry.type,
+    size: entry.size,
+    blob: entry.blob || null,
+    url: entry.pending ? entry.previewUrl : null,
+    pending: entry.pending,
+  }));
+  const index = Math.max(0, form.entries.findIndex((entry) => String(entry.id ?? entry.tempId) === String(key)));
+  openAttachmentViewer(items, index);
+}
+
+/**
+ * Полноэкранный просмотр: фото с масштабированием, PDF во фрейме.
+ * items — [{ name, type, size, blob | url, id?, incomeId?, pending? }]
+ */
+function openAttachmentViewer(items, startIndex = 0) {
+  closeViewer();
+  if (!items.length) return;
+
+  const viewer = {
+    items,
+    index: Math.max(0, Math.min(startIndex, items.length - 1)),
+    urls: [],              // созданные object URL — освобождаем при закрытии
+    cleanup: null,         // снятие обработчиков жестов
+  };
+  state.viewer = viewer;
+
+  const node = document.createElement('div');
+  node.className = 'viewer';
+  node.innerHTML = `
+    <div class="viewer__bar">
+      <button class="icon-btn" data-viewer="close" aria-label="Закрыть">${ICON.close}</button>
+      <span class="viewer__title truncate" id="viewer-title"></span>
+      <button class="icon-btn" data-viewer="delete" aria-label="Удалить вложение">${ICON.trash}</button>
+    </div>
+    <div class="viewer__stage" id="viewer-stage"></div>
+    <div class="viewer__foot">
+      <button class="btn btn--ghost" data-viewer="prev" aria-label="Предыдущее">‹</button>
+      <span class="viewer__counter num" id="viewer-counter"></span>
+      <button class="btn btn--ghost" data-viewer="next" aria-label="Следующее">›</button>
+      <a class="link" id="viewer-open" target="_blank" rel="noopener">Открыть в новой вкладке</a>
+    </div>`;
+
+  node.addEventListener('click', onViewerClick);
+  document.body.append(node);
+  document.documentElement.classList.add('viewer-open');
+  renderViewer();
+
+  document.addEventListener('keydown', onViewerKey);
+}
+
+function onViewerKey(event) {
+  if (event.key === 'Escape') closeViewer();
+  if (event.key === 'ArrowRight') viewerStep(1);
+  if (event.key === 'ArrowLeft') viewerStep(-1);
+}
+
+function onViewerClick(event) {
+  const action = event.target.closest('[data-viewer]');
+  if (!action) return;
+  const name = action.dataset.viewer;
+  if (name === 'close') { closeViewer(); return; }
+  if (name === 'next') { viewerStep(1); return; }
+  if (name === 'prev') { viewerStep(-1); return; }
+  if (name === 'delete') { deleteViewerAttachment(); return; }
+}
+
+function viewerStep(delta) {
+  const viewer = state.viewer;
+  if (!viewer) return;
+  const next = viewer.index + delta;
+  if (next < 0 || next >= viewer.items.length) return;
+  viewer.index = next;
+  renderViewer();
+}
+
+/** Ссылка на файл: создаём один раз и помним, чтобы освободить при закрытии. */
+function viewerUrl(viewer) {
+  const item = viewer.items[viewer.index];
+  if (item.url) return item.url;
+  if (!item.blob) return null;
+  const url = URL.createObjectURL(item.blob);
+  item.url = url;
+  viewer.urls.push(url);
+  return url;
+}
+
+function renderViewer() {
+  const viewer = state.viewer;
+  if (!viewer) return;
+  const item = viewer.items[viewer.index];
+
+  const title = document.querySelector('#viewer-title');
+  const counter = document.querySelector('#viewer-counter');
+  const openLink = document.querySelector('#viewer-open');
+  const stage = document.querySelector('#viewer-stage');
+  if (!stage) return;
+
+  title.textContent = item.name;
+  counter.textContent = viewer.items.length > 1 ? `${viewer.index + 1} из ${viewer.items.length}` : '';
+  title.title = `${item.name} · ${F.humanSize(item.size)}`;
+
+  const url = viewerUrl(viewer);
+  openLink.href = url || '#';
+  openLink.style.visibility = url ? 'visible' : 'hidden';
+
+  if (item.pending) title.textContent = `${item.name} · ещё не сохранено`;
+
+  if (!url) {
+    stage.innerHTML = '<p class="muted">Файл недоступен</p>';
+    return;
+  }
+
+  if (F.isImage(item.type)) {
+    stage.innerHTML = `<img class="viewer__img" id="viewer-img" src="${url}" alt="${esc(item.name)}">
+      <p class="viewer__zoom-hint">Двумя пальцами — увеличить, двойное касание — зум</p>`;
+    setupImageZoom(stage.querySelector('#viewer-img'));
+  } else if (F.isPdf(item.type)) {
+    // PDF показываем во фрейме; ссылка «Открыть в новой вкладке» — запасной путь
+    stage.innerHTML = `<iframe class="viewer__pdf" src="${url}" title="${esc(item.name)}"></iframe>`;
+  } else {
+    stage.innerHTML = `<p class="muted">Такой файл нельзя показать здесь.
+      <a href="${url}" target="_blank" rel="noopener">Открыть</a></p>`;
+  }
+}
+
+/** Закрывает просмотрщик и освобождает память. */
+function closeViewer() {
+  const viewer = state.viewer;
+  const node = document.querySelector('.viewer');
+  if (node) {
+    if (viewer && viewer.cleanup) viewer.cleanup();
+    node.remove();
+  }
+  if (viewer) {
+    for (const url of viewer.urls) {
+      const usedElsewhere = viewer.items.some((item) => item.pending && item.url === url);
+      if (!usedElsewhere) URL.revokeObjectURL(url);
+    }
+  }
+  document.removeEventListener('keydown', onViewerKey);
+  document.documentElement.classList.remove('viewer-open');
+  state.viewer = null;
+}
+
+async function deleteViewerAttachment() {
+  const viewer = state.viewer;
+  if (!viewer) return;
+  const item = viewer.items[viewer.index];
+
+  if (item.pending) {
+    toast('Файл ещё не сохранён — уберите его крестиком в форме');
+    return;
+  }
+  if (item.incomeId == null || item.id == null) return;
+
+  const answer = await openSheet({
+    title: 'Удалить вложение?',
+    message: `${item.name}\nФайл будет удалён безвозвратно.`,
+    confirmText: 'Удалить',
+    danger: true,
+  });
+  if (answer !== 'ok') return;
+
+  try {
+    await db.deleteAttachmentCascade(item.incomeId, item.id);
+    await db.markDirty();
+    viewer.items.splice(viewer.index, 1);
+    if (!viewer.items.length) {
+      closeViewer();
+    } else {
+      viewer.index = Math.min(viewer.index, viewer.items.length - 1);
+      renderViewer();
+    }
+    // обновляем и форму (если открыта), и список поступлений
+    if (state.attachmentForm && state.attachmentForm.incomeId === item.incomeId) {
+      state.attachmentForm.entries = state.attachmentForm.entries.filter((entry) => entry.id !== item.id);
+      renderAttachmentList();
+    }
+    await reload();
+    updateMoneyBlock();
+    toast('Вложение удалено', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось удалить', 'error');
+  }
+}
+
+/**
+ * Масштабирование фото: щипок двумя пальцами, панорамирование,
+ * двойное касание и свайп для перехода к следующему файлу.
+ */
+function setupImageZoom(img) {
+  const viewer = state.viewer;
+  if (!img || !viewer) return;
+
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
+  let startDistance = 0;
+  let startScale = 1;
+  let start = null;         // точка начала жеста
+  let moved = false;
+  let lastTap = 0;
+
+  const apply = (animate) => {
+    img.style.transition = animate ? 'transform .18s ease-out' : 'none';
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  };
+  const reset = () => { scale = 1; tx = 0; ty = 0; apply(true); };
+  const distance = (touches) => Math.hypot(
+    touches[0].clientX - touches[1].clientX,
+    touches[0].clientY - touches[1].clientY,
+  );
+
+  const onTouchStart = (event) => {
+    if (event.touches.length === 2) {
+      startDistance = distance(event.touches);
+      startScale = scale;
+      start = null;
+      return;
+    }
+    const touch = event.touches[0];
+    start = { x: touch.clientX, y: touch.clientY, tx, ty };
+    moved = false;
+
+    // двойное касание — приблизить или вернуть
+    const now = Date.now();
+    if (now - lastTap < 300) {
+      if (scale > 1) reset();
+      else { scale = 2.5; tx = 0; ty = 0; apply(true); }
+      lastTap = 0;
+      start = null;
+    } else {
+      lastTap = now;
+    }
+  };
+
+  const onTouchMove = (event) => {
+    if (event.touches.length === 2 && startDistance) {
+      event.preventDefault();
+      const next = Math.min(6, Math.max(1, (startScale * distance(event.touches)) / startDistance));
+      scale = next;
+      if (scale === 1) { tx = 0; ty = 0; }
+      apply(false);
+      moved = true;
+      return;
+    }
+    if (!start || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) moved = true;
+    if (scale > 1) {                     // сдвигаем увеличенное фото
+      event.preventDefault();
+      tx = start.tx + dx;
+      ty = start.ty + dy;
+      apply(false);
+    }
+  };
+
+  const onTouchEnd = (event) => {
+    if (event.touches.length < 2) startDistance = 0;
+    if (!start) return;
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // при единичном масштабе horizontal-свайп переключает файлы
+    if (scale === 1 && moved && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      viewerStep(dx < 0 ? 1 : -1);
+    }
+    if (scale < 1.05) reset();
+    start = null;
+  };
+
+  img.addEventListener('touchstart', onTouchStart, { passive: true });
+  img.addEventListener('touchmove', onTouchMove, { passive: false });
+  img.addEventListener('touchend', onTouchEnd, { passive: true });
+
+  // на компьютере — колесо мыши
+  const onWheel = (event) => {
+    event.preventDefault();
+    scale = Math.min(6, Math.max(1, scale * (event.deltaY < 0 ? 1.12 : 0.9)));
+    if (scale === 1) { tx = 0; ty = 0; }
+    apply(false);
+  };
+  img.addEventListener('wheel', onWheel, { passive: false });
+
+  viewer.cleanup = () => {
+    img.removeEventListener('touchstart', onTouchStart);
+    img.removeEventListener('touchmove', onTouchMove);
+    img.removeEventListener('touchend', onTouchEnd);
+    img.removeEventListener('wheel', onWheel);
+  };
 }
 
 /* ═══════════════════════════ разделы следующих шагов ═══════════════════════════ */
@@ -1089,6 +1654,15 @@ function onClick(event) {
   if (act === 'income-new') { push('incomeForm', {}); return; }
   if (act === 'income-edit') { push('incomeForm', { id: Number(target.dataset.id) }); return; }
   if (act === 'income-delete') { deleteIncome(Number(target.dataset.id)); return; }
+  if (act === 'pick-file') {
+    // нажатие на кнопку открывает системный выбор файлов (галерея, камера, PDF)
+    const input = document.querySelector(target.dataset.source === 'camera' ? '#file-camera' : '#file-gallery');
+    if (input) input.click();
+    return;
+  }
+  if (act === 'remove-attachment') { removeAttachment(target.dataset.key); return; }
+  if (act === 'preview-attachment') { openFormAttachment(target.dataset.key); return; }
+  if (act === 'open-attachments') { openIncomeAttachments(Number(target.dataset.id)); return; }
   if (act === 'filter-reset') {
     state.incomeFilter = { category: 'all', shift: 'all' };
     render();
@@ -1116,7 +1690,7 @@ function onSubmit(event) {
 
 /* ═══════════════════════════ service worker и обновление ═══════════════════════════ */
 
-const SW_VERSION = 'v2';   // при изменении файлов приложения поднимаем вместе с sw.js
+const SW_VERSION = 'v3';   // при изменении файлов приложения поднимаем вместе с sw.js
 
 async function initServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
