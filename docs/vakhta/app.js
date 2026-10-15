@@ -295,7 +295,8 @@ function homeView() {
     parts.push(idleCard(today));
   }
 
-  if (state.shifts.length) parts.push(moneyBlock());
+  // суммы показываем, как только есть что считать (вахты или поступления)
+  if (state.shifts.length || state.incomes.length) parts.push(moneyBlock());
 
   return {
     title: 'Вахта',
