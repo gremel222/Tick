@@ -2,3 +2,6 @@ node_modules/
 package-lock.json
 *.log
 .DS_Store
+
+# исходники справочника Blender качаются blender/tools/fetch-vendor.sh
+blender/vendor/
