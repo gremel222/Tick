@@ -114,9 +114,12 @@
 Из корня репозитория:
 
 ```bash
-python3 -m http.server 8080
-# и открыть http://localhost:8080/vakhta/
+node vakhta/tools/serve.mjs
+# и открыть http://localhost:4173/vakhta/
 ```
+
+Тот же сервер виден с телефона в той же сети Wi-Fi: откройте
+`http://<адрес-компьютера>:4173/vakhta/` в Safari.
 
 Важно: открывать именно через `http://`, а не двойным щелчком по файлу.
 При `file://` браузер запрещает и модули, и базу данных, и service worker.
