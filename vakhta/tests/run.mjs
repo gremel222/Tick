@@ -1425,7 +1425,21 @@ section('29. Запасные пути: скачивание вместо «По
   const downloaded = await F.saveFile(new NodeBlob(['проверка'], { type: 'text/plain' }), 'тест.txt');
   equal('без «Поделиться» файл скачивается', downloaded, 'downloaded');
 
-  // 2) пользователь закрыл окно «Поделиться» — копия не считается сделанной
+  // 2) браузер отказал в «Поделиться» уже после сборки файла (потерян «жест»):
+  //    это не отмена — файл должен быть скачан, а копия считаться сделанной
+  expose('navigator', {
+    ...window.navigator,
+    canShare: () => true,
+    share: async () => {
+      const error = new Error('нет разрешения');
+      error.name = 'NotAllowedError';
+      throw error;
+    },
+  });
+  const denied = await F.saveFile(new NodeBlob(['копия'], { type: 'application/json' }), 'копия.json');
+  equal('отказ в «Поделиться» приводит к скачиванию', denied, 'downloaded');
+
+  // 3) пользователь закрыл окно «Поделиться» — копия не считается сделанной
   await db.saveSettings({ lastBackupAt: null, dirtyAfterBackup: true, backupSnoozeUntil: null });
   await refresh();
   expose('navigator', {

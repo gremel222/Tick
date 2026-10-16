@@ -350,8 +350,11 @@ export async function saveFile(blob, filename, { title = '', text = '' } = {}) {
       await navigator.share({ files: [file], title, text });
       return 'shared';
     } catch (error) {
-      if (error && (error.name === 'AbortError' || error.name === 'NotAllowedError')) return 'cancelled';
-      // если «Поделиться» почему-то не сработало — пробуем скачать
+      // AbortError — человек закрыл окно «Поделиться»: файл не сохраняем.
+      if (error && error.name === 'AbortError') return 'cancelled';
+      // NotAllowedError бывает, когда браузер уже не даёт открыть «Поделиться»
+      // (iPhone теряет «жест» на большой сборке). Это не отмена — скачиваем файл,
+      // чтобы копия всё-таки сохранилась.
       console.warn('Поделиться не получилось, скачиваем файл:', error);
     }
   }
