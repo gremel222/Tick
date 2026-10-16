@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Счётчик вахты">
+  <!-- Иконка приложения: кольцо прогресса вахты и стрелка «прибора».
+       Тёмный фон совпадает с фоном приложения (#0E0F11). -->
+  <rect width="512" height="512" fill="#0E0F11"/>
+
+  <!-- кольцо: серая дорожка целиком -->
+  <circle cx="256" cy="256" r="154" fill="none" stroke="#2B2F36" stroke-width="46"/>
+
+  <!-- пройденная часть вахты: дуга 240° от верхней точки по часовой стрелке -->
+  <path d="M 256 102 A 154 154 0 1 1 122.6 333" fill="none" stroke="#FFB000"
+        stroke-width="46" stroke-linecap="round"/>
+
+  <!-- стрелка прибора -->
+  <path d="M 256 206 L 256 306" fill="none" stroke="#E6E8EA" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="15" fill="#FFB000"/>
+</svg>

@@ -1,0 +1,13 @@
+{
+  "name": "vakhta-tests",
+  "private": true,
+  "type": "module",
+  "description": "Проверки логики приложения «Счётчик вахты» (jsdom + fake-indexeddb).",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^25.0.0"
+  }
+}
