@@ -15,8 +15,12 @@ import * as db from './db.js';
 import * as D from './dates.js';
 import * as F from './files.js';
 import * as backup from './backup.js';
+import * as lock from './lock.js';
 
 /* ═══════════════════════════ состояние ═══════════════════════════ */
+
+/** Версия приложения. Меняется вместе с CACHE_VERSION в sw.js при выпуске обновления. */
+const SW_VERSION = 'v6';
 
 const state = {
   tab: 'home',              // активная вкладка: home | incomes | expenses | more
@@ -39,6 +43,13 @@ const state = {
   swRegistration: null,
   reloading: false,
   booted: false,
+  locked: false,            // показан экран входа по PIN
+  lockError: '',            // текст ошибки на экране входа
+  hiddenAt: null,           // когда приложение ушло в фон (для авто-блокировки)
+  pauseTimer: null,         // таймер обратного отсчёта паузы после неверных PIN
+  storageInfo: null,        // сколько места занято (для настроек)
+  erased: false,            // данные стёрты через «Забыл PIN» — предложим импорт копии
+  version: SW_VERSION,      // версия приложения (совпадает с версией кэша в sw.js)
 };
 
 /* ═══════════════════════════ мелкие помощники ═══════════════════════════ */
@@ -70,13 +81,29 @@ function countText(count, forms) {
 }
 
 /**
- * Разбор суммы из поля ввода. Человек может написать «50 000», «50.000»,
- * «50,000» — оставляем только цифры (копейки не поддерживаем).
- * Возвращает { value } или { error } с понятным текстом.
+ * Разбор суммы из поля ввода. Поддерживаются разделители разрядов —
+ * «50 000», «50.000», «50,000». Копейки не поддерживаются: дробное число
+ * («1500,50») — это ошибка, а не «150050». Возвращает { value } или { error }.
  */
 function parseAmount(text) {
-  const digits = String(text ?? '').replace(/\D/g, '');
-  if (!digits) return { error: 'Введите сумму' };
+  const raw = String(text ?? '').trim().replace(/[\s\u00a0\u202f]/g, '');
+  if (!raw) return { error: 'Введите сумму' };
+
+  // группировка разрядов: 1–3 цифры, дальше группы ровно по три
+  const grouped = /^\d{1,3}(?:[.,]\d{3})+$/;
+  let digits;
+  if (/^[\d.,]+$/.test(raw)) {
+    if (/^\d+$/.test(raw)) {
+      digits = raw;                                    // просто «50000»
+    } else if (grouped.test(raw)) {
+      digits = raw.replace(/[.,]/g, '');                // «50 000» / «50.000» / «50,000»
+    } else {
+      return { error: 'Введите целое число, например 50000 (копейки не поддерживаются)' };
+    }
+  } else {
+    return { error: 'Введите целое число, например 50000' };
+  }
+
   const value = Number(digits);
   if (!Number.isFinite(value) || value <= 0) return { error: 'Сумма должна быть больше нуля' };
   if (value > 999999999) return { error: 'Слишком большая сумма' };
@@ -116,6 +143,8 @@ const ICON = {
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><rect x="5" y="12" width="4" height="6" rx="1"/><rect x="11" y="7" width="4" height="11" rx="1"/><rect x="17" y="14" width="4" height="4" rx="1"/></svg>',
   wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14h2"/></svg>',
   save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h7V3M8 15h8v6H8z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.4"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.2M12 18.8V21M4.2 7.5l1.9 1.1M17.9 15.4l1.9 1.1M4.2 16.5l1.9-1.1M17.9 8.6l1.9-1.1"/></svg>',
 };
 
 /* ═══════════════════════════ запуск ═══════════════════════════ */
@@ -133,9 +162,15 @@ async function boot() {
 
     await reload();
     state.booted = true;
+
+    // если PIN включён — приложение открывается только через экран входа
+    state.locked = pinEnabled();
     render();
     watchDayChange();
+    watchAutoLock();
     initServiceWorker();
+    updateStorageInfo();
+    if (!state.locked) await maybeShowInstallHint();
   } catch (error) {
     console.error(error);
     $('#screen').innerHTML = `<div class="card"><p class="danger">Не удалось открыть хранилище</p>
@@ -266,6 +301,12 @@ function currentRoute() {
 /* ═══════════════════════════ перерисовка ═══════════════════════════ */
 
 function render() {
+  // пока PIN не введён, показываем только экран входа
+  if (state.locked) {
+    renderLock();
+    return;
+  }
+
   const route = currentRoute();
   const build = VIEWS[route.name] || VIEWS.home;
   const view = build(route.params || {});
@@ -357,10 +398,23 @@ function incomesOfShift(shiftId) {
 function homeView() {
   const today = D.todayKey();
 
+  // баннеры нужны в любом состоянии экрана, в том числе когда данных нет
+  const banners = [];
+  const reminder = backupReminderHtml();
+  if (reminder) banners.push(reminder);
+  if (state.erased) {
+    banners.push(`<div class="banner" role="status">
+      <span class="grow">Данные стёрты. Если есть файл копии — восстановите записи.</span>
+      <span class="banner__actions">
+        <button class="btn btn--primary" data-act="open-data">Импорт копии</button>
+      </span>
+    </div>`);
+  }
+
   if (!state.shifts.length && !state.incomes.length) {
     return {
       title: 'Вахта',
-      html: `
+      html: banners.join('') + `
         <div class="empty">
           <div class="empty__icon">${ICON.empty}</div>
           <h2>Вахт пока нет</h2>
@@ -371,11 +425,7 @@ function homeView() {
   }
 
   const active = activeShift(today);
-  const parts = [];
-
-  // напоминание о резервной копии — наверху, чтобы его точно увидели
-  const reminder = backupReminderHtml();
-  if (reminder) parts.push(reminder);
+  const parts = banners.slice();   // напоминания — наверху, чтобы их точно увидели
 
   if (active) {
     parts.push(gaugeCard(active, today));
@@ -2448,6 +2498,485 @@ async function snoozeBackup() {
   }
 }
 
+/* ═══════════════════════════ защита входа (PIN) ═══════════════════════════ */
+
+/** Открыто ли приложение как установленное (с экрана «Домой»). */
+function isStandalone() {
+  try {
+    if (navigator.standalone === true) return true;
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+    if (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches) return true;
+  } catch (error) {
+    // в некоторых окружениях matchMedia нет — считаем, что открыто в браузере
+  }
+  return false;
+}
+
+/** Включён ли PIN. */
+function pinEnabled() {
+  return !!state.settings.pinHash;
+}
+
+/** Запереть приложение (показать экран входа). */
+function lockApp() {
+  if (!pinEnabled()) return;
+  releaseAttachmentForm();
+  closeViewer();
+  state.locked = true;
+  state.lockError = '';
+  render();
+}
+
+/** Экран входа: рисуется вместо всего приложения, пока PIN не введён. */
+function renderLock() {
+  const pauseSeconds = lock.pauseLeft(state.settings.pinLockUntil);
+  $('#app-title').textContent = 'Вход по PIN';
+  $('#app-back').classList.add('hidden');
+  $('#tabbar').innerHTML = '';
+  $('#screen').innerHTML = `
+    <div class="lock">
+      <div class="lock__icon">${ICON.lock}</div>
+      <h2 class="lock__title">Счётчик вахты</h2>
+      <p class="muted center">Введите PIN-код, чтобы открыть данные</p>
+
+      <form class="lock__form" id="lock-form" data-act="lock-submit" novalidate>
+        <input class="input num lock__input" id="lock-pin" name="pin" type="password"
+               inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="${lock.MAX_PIN}"
+               placeholder="••••" ${pauseSeconds ? 'disabled' : ''} aria-label="PIN-код">
+        <p class="field__error ${state.lockError ? '' : 'hidden'}" id="lock-error">${esc(state.lockError)}</p>
+        <button class="btn btn--primary btn--block" type="submit" ${pauseSeconds ? 'disabled' : ''}>
+          ${pauseSeconds ? `Подождите ${lock.formatWait(pauseSeconds)}` : 'Войти'}
+        </button>
+      </form>
+
+      <button class="link" data-act="pin-forgot">Забыл PIN</button>
+      <p class="muted small center lock__note">
+        PIN защищает вход в приложение. Данные в браузере не шифруются —
+        они лежат в хранилище этого устройства.
+      </p>
+    </div>`;
+
+  // пока идёт пауза — раз в секунду обновляем обратный отсчёт
+  if (pauseSeconds) {
+    clearTimeout(state.pauseTimer);
+    state.pauseTimer = setTimeout(() => { if (state.locked) render(); }, 1000);
+  } else if (state.pauseTimer) {
+    clearTimeout(state.pauseTimer);
+    state.pauseTimer = null;
+  }
+  const input = $('#lock-pin');
+  if (input && !pauseSeconds) setTimeout(() => input.focus(), 50);
+}
+
+/** Проверка введённого PIN. */
+async function submitLock(form) {
+  const pin = String(form.elements.pin.value || '').trim();
+  const settings = state.settings;
+
+  const pauseSeconds = lock.pauseLeft(settings.pinLockUntil);
+  if (pauseSeconds) {
+    state.lockError = `Слишком много попыток. Подождите ${lock.formatWait(pauseSeconds)}.`;
+    renderLock();
+    return;
+  }
+
+  if (!lock.isValidPin(pin)) {
+    state.lockError = `PIN — от ${lock.MIN_PIN} до ${lock.MAX_PIN} цифр`;
+    renderLock();
+    return;
+  }
+
+  let ok = false;
+  try {
+    ok = await lock.verifyPin(pin, settings);
+  } catch (error) {
+    console.error(error);
+    state.lockError = 'Не удалось проверить PIN на этом устройстве';
+    renderLock();
+    return;
+  }
+
+  if (!ok) {
+    const failed = (settings.pinFailed || 0) + 1;
+    const patch = { pinFailed: failed };
+    let message = `Неверный PIN. Осталось попыток: ${Math.max(0, lock.WRONG_ATTEMPTS_BEFORE_PAUSE - failed)}`;
+
+    // после пяти неверных попыток — пауза, дальше она растёт
+    if (failed >= lock.WRONG_ATTEMPTS_BEFORE_PAUSE) {
+      const pauses = (settings.pinPauses || 0) + 1;
+      const waitMs = lock.pauseDuration(pauses - 1);
+      patch.pinFailed = 0;
+      patch.pinPauses = pauses;
+      patch.pinLockUntil = Date.now() + waitMs;
+      message = `Слишком много попыток. Подождите ${lock.formatWait(Math.round(waitMs / 1000))}.`;
+    }
+
+    try {
+      await db.saveSettings(patch);
+      state.settings = await db.getSettings();
+    } catch (error) {
+      console.error(error);
+    }
+    state.lockError = message;
+    renderLock();
+    return;
+  }
+
+  // успех: сбрасываем счётчики и открываем приложение
+  try {
+    await db.saveSettings({ pinFailed: 0, pinPauses: 0, pinLockUntil: 0 });
+    state.settings = await db.getSettings();
+  } catch (error) {
+    console.error(error);
+  }
+  state.locked = false;
+  state.lockError = '';
+  clearTimeout(state.pauseTimer);
+  state.pauseTimer = null;
+  await reload();
+  render();
+}
+
+/**
+ * Следим за скрытием приложения: если вернулись позже чем через 30 секунд,
+ * а PIN включён — запираем. Пока приложение скрыто, накрываем экран «занавесом»,
+ * чтобы в переключателе приложений не было видно сумм.
+ */
+function watchAutoLock() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      state.hiddenAt = Date.now();
+      if (pinEnabled() && !state.locked) document.body.classList.add('is-veiled');
+      return;
+    }
+    document.body.classList.remove('is-veiled');
+    if (lock.shouldAutoLock(state.hiddenAt, Date.now(), pinEnabled()) && !state.locked) {
+      state.hiddenAt = null;
+      lockApp();
+      return;
+    }
+    state.hiddenAt = null;
+  });
+}
+
+/* ── «Забыл PIN»: честный сценарий со стиранием данных ── */
+
+async function forgotPin() {
+  const answer = await openSheet({
+    title: 'Забыли PIN?',
+    message: `Войти можно только после стирания всех данных на этом устройстве:
+вахты, поступления, расходы и расчётные листки будут удалены безвозвратно.
+
+После этого данные можно восстановить из резервной копии — файла, который вы сохраняли.
+
+Продолжить стирание?`,
+    confirmText: 'Стереть данные',
+    danger: true,
+  });
+  if (answer !== 'ok') return;
+
+  const confirm = await openSheet({
+    title: 'Точно стереть?',
+    message: 'Это последнее предупреждение. Вернуть данные без резервной копии не получится.',
+    confirmText: 'Да, стереть всё',
+    danger: true,
+  });
+  if (confirm !== 'ok') return;
+
+  try {
+    await db.eraseDatabase();
+    state.locked = false;
+    state.lockError = '';
+    state.erased = true;              // после стирания предложим восстановление из копии
+    state.stack = [];
+    state.tab = 'home';
+    state.attachmentForm = null;
+    state.formDraft = null;
+    clearTimeout(state.pauseTimer);
+    await reload();
+    render();
+    toast('Данные стёрты. Можно восстановить их из копии', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось стереть данные', 'error');
+  }
+}
+
+/* ── включение, смена и выключение PIN ── */
+
+/** Окно ввода PIN. Возвращает строку или null, если отменили. */
+function openPinSheet({ title, message = '', confirmText = 'Готово' }) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <form class="sheet" role="dialog" aria-modal="true">
+        <h2>${esc(title)}</h2>
+        ${message ? `<p>${esc(message)}</p>` : ''}
+        <div class="field">
+          <label class="field__label" for="sheet-pin">PIN-код</label>
+          <input class="input num" id="sheet-pin" name="pin" type="password" inputmode="numeric"
+                 pattern="[0-9]*" autocomplete="off" maxlength="${lock.MAX_PIN}" placeholder="••••">
+          <span class="field__hint">От ${lock.MIN_PIN} до ${lock.MAX_PIN} цифр</span>
+          <span class="field__error hidden" data-error="pin"></span>
+        </div>
+        <div class="sheet__actions">
+          <button class="btn btn--primary" type="submit">${esc(confirmText)}</button>
+          <button class="btn" type="button" data-sheet="cancel">Отмена</button>
+        </div>
+      </form>`;
+
+    const finish = (value) => { backdrop.remove(); resolve(value); };
+    backdrop.addEventListener('click', (event) => {
+      if (event.target.closest('[data-sheet]')) finish(null);
+      else if (event.target === backdrop) finish(null);
+    });
+
+    backdrop.querySelector('form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = backdrop.querySelector('#sheet-pin');
+      const pin = input.value.trim();
+      const error = backdrop.querySelector('[data-error="pin"]');
+      if (!lock.isValidPin(pin)) {
+        error.textContent = `Нужны ${lock.MIN_PIN}–${lock.MAX_PIN} цифры`;
+        error.classList.remove('hidden');
+        input.focus();
+        return;
+      }
+      finish(pin);
+    });
+
+    document.body.append(backdrop);
+    setTimeout(() => backdrop.querySelector('#sheet-pin').focus(), 30);
+  });
+}
+
+/** Сохранить новый PIN: соль + SHA-256, сам PIN нигде не хранится. */
+async function storePin(pin, message) {
+  try {
+    const salt = lock.randomSalt();
+    const hash = await lock.hashPin(pin, salt);
+    await db.saveSettings({ pinHash: hash, pinSalt: salt, pinFailed: 0, pinPauses: 0, pinLockUntil: 0 });
+    await reload();
+    render();
+    toast(message, 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось сохранить PIN', 'error');
+  }
+}
+
+/** Включить PIN: вводим дважды. */
+async function enablePin() {
+  if (!lock.pinAvailable()) {
+    toast('PIN недоступен: нужен https', 'error');
+    return;
+  }
+  const pin = await openPinSheet({
+    title: 'Придумайте PIN',
+    message: 'Он будет спрашиваться при каждом входе в приложение.',
+  });
+  if (pin == null) return;
+
+  const again = await openPinSheet({ title: 'Повторите PIN', confirmText: 'Включить PIN' });
+  if (again == null) return;
+  if (again !== pin) {
+    toast('PIN-коды не совпали', 'error');
+    return;
+  }
+
+  await storePin(pin, 'PIN включён');
+}
+
+/** Сменить PIN: сначала проверяем текущий. */
+async function changePin() {
+  const current = await openPinSheet({ title: 'Текущий PIN', confirmText: 'Продолжить' });
+  if (current == null) return;
+  if (!(await lock.verifyPin(current, state.settings))) {
+    toast('Неверный PIN', 'error');
+    return;
+  }
+
+  const pin = await openPinSheet({ title: 'Новый PIN' });
+  if (pin == null) return;
+  const again = await openPinSheet({ title: 'Повторите новый PIN', confirmText: 'Сохранить' });
+  if (again == null) return;
+  if (again !== pin) {
+    toast('PIN-коды не совпали', 'error');
+    return;
+  }
+
+  await storePin(pin, 'PIN изменён');
+}
+
+/** Выключить PIN: тоже по текущему PIN, чтобы защиту не снял кто угодно. */
+async function disablePin() {
+  const current = await openPinSheet({ title: 'Введите текущий PIN', confirmText: 'Выключить PIN' });
+  if (current == null) return;
+  if (!(await lock.verifyPin(current, state.settings))) {
+    toast('Неверный PIN', 'error');
+    return;
+  }
+
+  try {
+    await db.saveSettings({ pinHash: null, pinSalt: null, pinFailed: 0, pinPauses: 0, pinLockUntil: 0 });
+    await reload();
+    render();
+    toast('PIN выключен', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось выключить PIN', 'error');
+  }
+}
+
+/* ── постоянное хранилище ── */
+
+/** Прочитать, сколько места занимают данные (для настроек). */
+async function updateStorageInfo() {
+  try {
+    state.storageInfo = await db.storageEstimate();
+  } catch (error) {
+    state.storageInfo = null;
+  }
+}
+
+/** Попросить постоянное хранилище ещё раз. */
+async function retryPersist() {
+  try {
+    const persistState = await db.requestPersistentStorage();
+    await db.saveSettings({ persistState });
+    await reload();
+    render();
+    toast(persistState === 'granted'
+      ? 'Постоянное хранилище разрешено'
+      : 'Браузер не разрешил: делайте копии чаще', persistState === 'granted' ? 'ok' : 'error');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось запросить разрешение', 'error');
+  }
+}
+
+/* ═══════════════════════════ «Настройки» ═══════════════════════════ */
+
+function settingsView() {
+  const settings = state.settings;
+  const available = lock.pinAvailable();
+  const persisted = settings.persistState === 'granted';
+  const storage = state.storageInfo;
+
+  return {
+    title: 'Настройки',
+    html: `
+      <section class="card">
+        <h2 class="card-title">Защита входа</h2>
+        <div class="switch-row">
+          <span>PIN-код при входе</span>
+          <button class="switch" role="switch" aria-checked="${pinEnabled()}"
+                  data-act="pin-toggle" aria-label="PIN-код при входе"></button>
+        </div>
+        ${!available ? `<div class="banner banner--warn" style="margin-top:10px">
+            <span class="grow">PIN недоступен: нужен https (на GitHub Pages он есть).</span>
+          </div>` : ''}
+        ${pinEnabled() ? `<div class="stack-sm" style="margin-top:10px">
+            <button class="btn btn--block" data-act="pin-change">Изменить PIN</button>
+            <button class="btn btn--block" data-act="pin-lock-now">Запереть сейчас</button>
+            <button class="link" data-act="pin-forgot">Забыл PIN</button>
+          </div>` : ''}
+        <p class="muted small" style="margin-top:10px">
+          PIN защищает вход в приложение: без него не увидеть вахты, суммы и расчётные листки.
+          Данные в браузере при этом <b>не шифруются</b> — они лежат в хранилище устройства,
+          и доступ к самому устройству даёт доступ к базе. Биометрию (Face ID) мы намеренно
+          не используем: в установленном PWA на iPhone она работает нестабильно.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Хранение данных</h2>
+        <dl class="kv">
+          <div class="kv__row"><dt>Постоянное хранилище</dt>
+            <dd class="${persisted ? 'ok' : 'warn'}">${persisted ? 'разрешено'
+              : settings.persistState === 'denied' ? 'не разрешено'
+              : settings.persistState === 'unsupported' ? 'не поддерживается' : '—'}</dd></div>
+          ${storage ? `<div class="kv__row"><dt>Занято данных</dt>
+            <dd class="num">${F.humanSize(storage.usage)}${storage.quota ? ` из ${F.humanSize(storage.quota)}` : ''}</dd></div>` : ''}
+        </dl>
+        <p class="muted small" style="margin-top:8px">
+          ${persisted
+            ? 'Система не удалит данные при нехватке места.'
+            : 'Без этого разрешения браузер может удалить данные при нехватке места — делайте копии чаще.'}
+        </p>
+        ${!persisted && available ? '<button class="btn btn--block" style="margin-top:10px" data-act="persist-retry">Попросить разрешение снова</button>' : ''}
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Установка на iPhone</h2>
+        <p class="muted small">${isStandalone()
+          ? 'Приложение запущено с экрана «Домой» — это правильный режим.'
+          : 'Сейчас приложение открыто в браузере. У Safari и у приложения с экрана «Домой» разные хранилища, поэтому лучше сначала установить приложение, а данные вводить уже в нём.'}</p>
+        <div class="stack-sm" style="margin-top:10px">
+          <button class="btn btn--block" data-act="install-help">Как установить на экран «Домой»</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">О приложении</h2>
+        <dl class="kv">
+          <div class="kv__row"><dt>Версия приложения</dt><dd class="num">${esc(state.version)}</dd></div>
+          <div class="kv__row"><dt>Версия схемы данных</dt><dd class="num">${db.SCHEMA_VERSION}</dd></div>
+          <div class="kv__row"><dt>Записей в базе</dt>
+            <dd class="num">${state.shifts.length + state.incomes.length + state.expenses.length}</dd></div>
+        </dl>
+        <p class="muted small" style="margin-top:8px">Сервера нет: приложение работает целиком на устройстве
+          и ничего никуда не отправляет. Обновление приложения данные не затрагивает.</p>
+      </section>`,
+  };
+}
+
+/** Инструкция «как установить на экран Домой». */
+function showInstallHelp() {
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent || '');
+  return openSheet({
+    title: 'Установка на экран «Домой»',
+    message: ios
+      ? `1. Откройте приложение в Safari.
+2. Нажмите кнопку «Поделиться» (квадрат со стрелкой вверх).
+3. Выберите «На экран „Домой“» и нажмите «Добавить».
+4. Запускайте приложение с иконки — тогда у него своё хранилище, и Safari не удалит данные вместе с историей.
+
+Важно: данные Safari и приложения с экрана «Домой» хранятся отдельно. Вводите данные уже в установленном приложении.`
+      : `1. Откройте меню браузера.
+2. Выберите «Установить приложение» или «Добавить на главный экран».
+3. Запускайте приложение с иконки — данные останутся на устройстве.`,
+    confirmText: 'Понятно',
+    cancelText: 'Закрыть',
+  });
+}
+
+/** Подсказка об установке при первом запуске в браузере (не в установленном PWA). */
+async function maybeShowInstallHint() {
+  if (isStandalone()) return;
+  if (state.settings.installHintShown) return;
+
+  const answer = await openSheet({
+    title: 'Сначала установите приложение',
+    message: `Вы открыли приложение в браузере. На iPhone у Safari и у приложения с экрана «Домой»
+разные хранилища данных: то, что введено в Safari, не увидит установленное приложение.
+
+Лучше сразу добавить приложение на экран «Домой» («Поделиться» → «На экран „Домой“»)
+и вводить данные уже там.`,
+    confirmText: 'Как установить',
+    cancelText: 'Понятно, скрыть',
+  });
+
+  try {
+    await db.saveSettings({ installHintShown: true });
+    state.settings = await db.getSettings();
+  } catch (error) {
+    console.error(error);
+  }
+  if (answer === 'ok') await showInstallHelp();
+}
+
 /* ═══════════════════════════ разделы следующих шагов ═══════════════════════════ */
 
 function soonView(title, text) {
@@ -2467,11 +2996,17 @@ function moreView() {
     { act: 'open-compare', icon: ICON.chart, label: 'Сравнение вахт', value: '' },
     { act: 'open-categories', icon: ICON.wallet, label: 'Категории расходов', value: state.categories.length },
     { act: 'open-data', icon: ICON.save, label: 'Копия и экспорт', value: state.settings.lastBackupAt ? D.formatDayMonth(state.settings.lastBackupAt) : '' },
+    { act: 'open-settings', icon: ICON.gear, label: 'Настройки', value: pinEnabled() ? 'PIN' : '' },
   ];
 
   return {
     title: 'Ещё',
     html: `
+      ${state.settings.persistState && state.settings.persistState !== 'granted' ? `<div class="banner banner--warn" role="status">
+        <span class="grow">Браузер не разрешил постоянное хранилище: данные могут удалиться при нехватке места.
+          <span class="muted small">Делайте копии чаще.</span></span>
+        <span class="banner__actions"><button class="btn" data-act="open-settings">Подробнее</button></span>
+      </div>` : ''}
       <ul class="list">
         ${rows.map((row) => `
           <li class="item item--row">
@@ -2487,7 +3022,8 @@ function moreView() {
             </button>
           </li>`).join('')}
       </ul>
-      <p class="muted small">Дальше появятся: PIN-код для входа и информация о хранении данных.</p>`,
+      <p class="muted small">Сервера нет: данные лежат только на этом устройстве. Обновление приложения
+        данные не затрагивает, а копия защитит от потери.</p>`,
   };
 }
 
@@ -2608,6 +3144,13 @@ function onClick(event) {
   if (act === 'category-delete') { deleteCategory(target.dataset.id); return; }
   if (act === 'open-compare') { state.tab = 'more'; push('compare', {}); return; }
   if (act === 'open-data') { push('data', {}); return; }
+  if (act === 'open-settings') { push('settings', {}); return; }
+  if (act === 'pin-toggle') { pinEnabled() ? disablePin() : enablePin(); return; }
+  if (act === 'pin-change') { changePin(); return; }
+  if (act === 'pin-lock-now') { goTab('home'); lockApp(); return; }
+  if (act === 'pin-forgot') { forgotPin(); return; }
+  if (act === 'install-help') { showInstallHelp(); return; }
+  if (act === 'persist-retry') { retryPersist(); return; }
   if (act === 'backup-export') { exportBackup(); return; }
   if (act === 'backup-snooze') { snoozeBackup(); return; }
   if (act === 'csv-export') { exportCsv(); return; }
@@ -2658,11 +3201,10 @@ function onSubmit(event) {
   if (act === 'shift-save') saveShift(form);
   if (act === 'income-save') saveIncome(form);
   if (act === 'expense-save') saveExpense(form);
+  if (act === 'lock-submit') submitLock(form);
 }
 
 /* ═══════════════════════════ service worker и обновление ═══════════════════════════ */
-
-const SW_VERSION = 'v5';   // при изменении файлов приложения поднимаем вместе с sw.js
 
 async function initServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
@@ -2724,6 +3266,7 @@ const VIEWS = {
   categories: categoriesView,
   compare: compareView,
   data: dataView,
+  settings: settingsView,
   more: moreView,
   shifts: shiftsView,
   shiftForm: shiftFormView,
@@ -2745,4 +3288,8 @@ if (typeof document !== 'undefined' && document.getElementById('app')) {
 }
 
 // удобно при отладке: window.vakhta.state
-window.vakhta = { state, db, dates: D, render, reload, VERSION: SW_VERSION };
+window.vakhta = {
+  state, db, dates: D, files: F, backup, lock,
+  render, reload, lockApp, settings: () => settingsView(), maybeShowInstallHint, parseAmount,
+  get VERSION() { return SW_VERSION; },
+};

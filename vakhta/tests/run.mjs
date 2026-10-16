@@ -89,9 +89,17 @@ const D = await import(`${ROOT}dates.js`);
 const db = await import(`${ROOT}db.js`);
 const F = await import(`${ROOT}files.js`);
 const backup = await import(`${ROOT}backup.js`);
+const lock = await import(`${ROOT}lock.js`);
 const app = window.vakhta;
 
-await sleep(80);   // ждём завершения boot()
+await sleep(120);   // ждём завершения boot()
+
+// при первом запуске в браузере приложение показывает подсказку об установке —
+// закрываем её, как это сделал бы человек (поведение проверяется отдельно ниже)
+if (window.document.querySelector('.sheet [data-sheet="cancel"]')) {
+  window.document.querySelector('.sheet [data-sheet="cancel"]').click();
+  await sleep(60);
+}
 
 const $ = (selector) => window.document.querySelector(selector);
 const text = (selector) => ($(selector) ? normalize($(selector).textContent).trim() : null);
@@ -1483,6 +1491,485 @@ section('30. Целостность офлайн-кэша и публикаци�
   check('версия кэша указана и не пустая', /const CACHE_VERSION = 'v\d+';/.test(swSource));
   check('версии приложения и кэша совпадают',
     swSource.match(/CACHE_VERSION = '(v\d+)'/)[1] === appSource.match(/SW_VERSION = '(v\d+)'/)[1]);
+}
+
+
+/* ═══════════════════════════ 31. PIN: хэш и паузы ═══════════════════════════ */
+
+section('31. PIN: проверка кода, соль и паузы');
+{
+  check('SubtitleCrypto доступен', lock.pinAvailable());
+  check('4 цифры — можно', lock.isValidPin('1234'));
+  check('6 цифр — можно', lock.isValidPin('123456'));
+  check('3 цифры — нельзя', !lock.isValidPin('123'));
+  check('7 цифр — нельзя', !lock.isValidPin('1234567'));
+  check('буквы — нельзя', !lock.isValidPin('12a4'));
+  check('пустой — нельзя', !lock.isValidPin(''));
+
+  const salt = lock.randomSalt();
+  equal('соль — 32 hex-символа (16 байт)', salt.length, 32);
+  check('соль состоит из hex', /^[0-9a-f]+$/.test(salt));
+  check('две соли не совпадают', salt !== lock.randomSalt());
+
+  const hash1 = await lock.hashPin('1234', salt);
+  const hash2 = await lock.hashPin('1234', salt);
+  equal('хэш одной соли и PIN повторяется', hash1, hash2);
+  equal('длина хэша SHA-256 в hex — 64', hash1.length, 64);
+  check('другой PIN даёт другой хэш', hash1 !== await lock.hashPin('1235', salt));
+  check('другая соль даёт другой хэш', hash1 !== await lock.hashPin('1234', lock.randomSalt()));
+  check('в хэше нет самого PIN', !hash1.includes('1234'));
+
+  check('верный PIN проходит проверку', await lock.verifyPin('1234', { pinHash: hash1, pinSalt: salt }));
+  check('неверный PIN не проходит', !(await lock.verifyPin('9999', { pinHash: hash1, pinSalt: salt })));
+  check('без сохранённого PIN проверка не проходит', !(await lock.verifyPin('1234', { pinHash: null, pinSalt: null })));
+
+  // паузы: 30 с, затем удвоение, но не больше 15 минут
+  equal('первая пауза — 30 секунд', lock.pauseDuration(0), 30000);
+  equal('вторая — минута', lock.pauseDuration(1), 60000);
+  equal('третья — две минуты', lock.pauseDuration(2), 120000);
+  equal('дальше не больше 15 минут', lock.pauseDuration(20), 15 * 60 * 1000);
+  equal('текст ожидания: секунды', lock.formatWait(30), '30 секунд');
+  equal('текст ожидания: минута', lock.formatWait(60), '1 минута');
+  equal('текст ожидания: минуты и секунды', lock.formatWait(130), '2 минуты 10 секунд');
+  equal('сколько осталось ждать', lock.pauseLeft(Date.now() + 5000), 5);
+  equal('после паузы ждать не нужно', lock.pauseLeft(Date.now() - 5000), 0);
+
+  // авто-блокировка: только при включённом PIN и скрытии дольше 30 секунд
+  const now = Date.now();
+  check('через 29 секунд не блокируем', !lock.shouldAutoLock(now - 29000, now, true));
+  check('через 31 секунду блокируем', lock.shouldAutoLock(now - 31000, now, true));
+  check('без PIN не блокируем', !lock.shouldAutoLock(now - 10 * 60000, now, false));
+  check('если приложение не скрывалось — не блокируем', !lock.shouldAutoLock(null, now, true));
+}
+
+/* ═══════════════════════════ 32. PIN: включение через настройки ═══════════════════════════ */
+
+/** Заполнить окно ввода PIN и отправить форму. */
+async function submitPinSheet(pin) {
+  const sheet = $('.sheet');
+  const input = $('#sheet-pin');
+  if (!sheet || !input) return false;
+  input.value = pin;
+  sheet.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(120);
+  return true;
+}
+
+/** Открыть настройки из раздела «Ещё». */
+async function openSettings() {
+  $('.tab[data-tab="more"]').click();
+  await sleep(30);
+  $('[data-act="open-settings"]').click();
+  await sleep(60);
+}
+
+section('32. PIN: включение, вход и смена');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  await db.clear('expenses');
+  await db.clear('incomes');
+  await db.clear('shifts');
+  await db.addShift({ arrival: key(-5), workStart: key(-5), workEnd: key(10) });
+  await db.addIncome({ shiftId: 1, amount: 50000, date: key(-1), category: 'аванс', note: '' });
+  await db.saveSettings({ pinHash: null, pinSalt: null, pinFailed: 0, pinPauses: 0, pinLockUntil: 0 });
+  await refresh();
+
+  await openSettings();
+  equal('настройки открыты', text('#app-title'), 'Настройки');
+  check('переключатель PIN выключен', $('[data-act="pin-toggle"]').getAttribute('aria-checked') === 'false');
+  check('честная надпись про шифрование', /не шифруются/.test(normalize(html())));
+
+  // 1) включаем PIN: два ввода должны совпасть
+  $('[data-act="pin-toggle"]').click();
+  await sleep(80);
+  check('спросили PIN', /Придумайте PIN/.test($('.sheet h2').textContent));
+  await submitPinSheet('12');                                  // слишком короткий
+  check('короткий PIN отклонён', /Нужны 4–6 цифры/.test($('.sheet [data-error="pin"]').textContent));
+  await submitPinSheet('4321');
+  check('спросили повтор', /Повторите PIN/.test($('.sheet h2').textContent));
+  await submitPinSheet('1111');                                // не совпало
+  check('несовпадение замечено', /не совпали/.test(normalize($('#toast-root').textContent)));
+  equal('PIN не сохранился при несовпадении', (await db.getSettings()).pinHash, null);
+
+  $('[data-act="pin-toggle"]').click();
+  await sleep(80);
+  await submitPinSheet('4321');
+  await submitPinSheet('4321');
+  await sleep(150);
+
+  const settings = await db.getSettings();
+  check('PIN сохранён как хэш', typeof settings.pinHash === 'string' && settings.pinHash.length === 64);
+  check('в базе есть соль', typeof settings.pinSalt === 'string' && settings.pinSalt.length === 32);
+  check('сам PIN нигде не лежит', !JSON.stringify(settings).includes('4321'));
+  check('переключатель показывает включённый PIN', $('[data-act="pin-toggle"]').getAttribute('aria-checked') === 'true');
+  check('появились кнопки управления PIN', !!$('[data-act="pin-change"]') && !!$('[data-act="pin-lock-now"]'));
+
+  // 2) «Запереть сейчас» — показывается экран входа и данные не видны
+  $('[data-act="pin-lock-now"]').click();
+  await sleep(80);
+  check('экран входа показан', !!$('#lock-form'));
+  check('нижние вкладки скрыты', $('#tabbar').innerHTML.trim() === '');
+  check('суммы на экране не видны', !/50 000/.test(html()));
+  check('есть ссылка «Забыл PIN»', !!$('[data-act="pin-forgot"]'));
+
+  // 3) неверный PIN
+  const form = $('#lock-form');
+  form.elements.pin.value = '9999';
+  form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(120);
+  check('сказано про неверный PIN', /Неверный PIN/.test($('#lock-error').textContent));
+  check('показано, сколько попыток осталось', /Осталось попыток: 4/.test($('#lock-error').textContent));
+
+  // 4) верный PIN открывает приложение
+  const form2 = $('#lock-form');
+  form2.elements.pin.value = '4321';
+  form2.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+  await sleep(200);
+  check('приложение открылось', !$('#lock-form'));
+  // «Запереть сейчас» уводит на «Главную», поэтому после входа мы именно там
+  check('вернулись вкладки и экран', $('#tabbar').children.length === 4 && text('#app-title') === 'Вахта');
+  equal('счётчик ошибок сброшен', (await db.getSettings()).pinFailed, 0);
+
+  // 5) смена PIN: сначала просят текущий
+  await openSettings();
+  $('[data-act="pin-change"]').click();
+  await sleep(80);
+  check('спросили текущий PIN', /Текущий PIN/.test($('.sheet h2').textContent));
+  await submitPinSheet('0000');
+  await sleep(120);
+  check('неверный текущий PIN не пропущен', /Неверный PIN/.test(normalize($('#toast-root').textContent)));
+
+  $('[data-act="pin-change"]').click();
+  await sleep(80);
+  await submitPinSheet('4321');
+  await submitPinSheet('5678');
+  await submitPinSheet('5678');
+  await sleep(150);
+  const changed = await db.getSettings();
+  check('новый PIN работает', await lock.verifyPin('5678', changed));
+  check('старый PIN больше не работает', !(await lock.verifyPin('4321', changed)));
+}
+
+section('33. PIN: пауза после пяти неверных попыток');
+{
+  // включим PIN заново и запрём приложение
+  const salt = lock.randomSalt();
+  await db.saveSettings({ pinHash: await lock.hashPin('1111', salt), pinSalt: salt, pinFailed: 0, pinPauses: 0, pinLockUntil: 0 });
+  await refresh();
+  app.lockApp();
+  await sleep(60);
+
+  const tryPin = async (pin) => {
+    const form = $('#lock-form');
+    form.elements.pin.value = pin;
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await sleep(140);
+  };
+
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    await tryPin('0000');
+    check(`попытка ${attempt}: показано, сколько осталось`,
+      new RegExp(`Осталось попыток: ${5 - attempt}`).test($('#lock-error').textContent));
+  }
+
+  await tryPin('0000');   // пятая — пауза
+  check('после пятой попытки включилась пауза', /Слишком много попыток\. Подождите/.test($('#lock-error').textContent));
+  check('сказано про 30 секунд', /30 секунд/.test($('#lock-error').textContent));
+
+  const locked = await db.getSettings();
+  check('пауза записана в настройки', locked.pinLockUntil > Date.now());
+  equal('счётчик пауз увеличен', locked.pinPauses, 1);
+  check('поле ввода заблокировано', $('#lock-pin').disabled === true);
+  check('кнопка входа заблокирована', $('#lock-form button[type="submit"]').disabled === true);
+  check('на кнопке виден отсчёт', /Подождите/.test($('#lock-form button[type="submit"]').textContent));
+
+  // верный PIN во время паузы тоже не проходит
+  await tryPin('1111');
+  check('во время паузы верный PIN не пускает', !!$('#lock-form'));
+
+  // имитируем окончание паузы
+  await db.saveSettings({ pinLockUntil: Date.now() - 1000 });
+  await refresh();
+  app.render();
+  await sleep(60);
+  check('после паузы поле снова доступно', $('#lock-pin') && !$('#lock-pin').disabled);
+
+  // следующая серия ошибок (без успешного входа) должна дать уже минуту
+  for (let attempt = 0; attempt < 5; attempt += 1) await tryPin('0000');
+  check('вторая пауза — уже минута', /1 минута/.test($('#lock-error').textContent));
+  equal('счётчик пауз растёт', (await db.getSettings()).pinPauses, 2);
+
+  // заканчиваем паузу и входим верным PIN — счётчики должны сброситься
+  await db.saveSettings({ pinLockUntil: Date.now() - 1000 });
+  await refresh();
+  app.render();
+  await sleep(60);
+  await tryPin('1111');
+  check('верный PIN после паузы открывает приложение', !$('#lock-form'));
+  const after = await db.getSettings();
+  equal('счётчик пауз сброшен', after.pinPauses, 0);
+}
+
+section('34. PIN: «Забыл PIN» стирает данные, затем можно восстановиться');
+{
+  const good = await backup.buildBackup();
+
+  // приложение заперто, PIN забыт
+  app.lockApp();
+  await sleep(60);
+  $('[data-act="pin-forgot"]').click();
+  await sleep(80);
+  check('предупреждение про стирание', /Войти можно только после стирания всех данных/.test(normalize($('.sheet p').textContent)));
+  check('упомянуто восстановление из копии', /резервной копии/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="ok"]').click();
+  await sleep(80);
+  check('спрашивают подтверждение второй раз', /Точно стереть\?/.test($('.sheet h2').textContent));
+  $('[data-sheet="cancel"]').click();
+  await sleep(80);
+  equal('отмена оставила данные', (await db.listIncomes()).length, 1);
+  check('отмена не сняла PIN', (await db.getSettings()).pinHash !== null);
+
+  // теперь подтверждаем оба раза
+  $('[data-act="pin-forgot"]').click();
+  await sleep(80);
+  $('[data-sheet="ok"]').click();
+  await sleep(80);
+  $('[data-sheet="ok"]').click();
+  await sleep(500);
+
+  check('приложение разблокировано', !$('#lock-form'));
+  equal('данные стёрты', (await db.listIncomes()).length, 0);
+  equal('вахты стёрты', (await db.listShifts()).length, 0);
+  equal('PIN сброшен', (await db.getSettings()).pinHash, null);
+  equal('стартовые категории созданы заново', (await db.listCategories()).length, 4);
+  check('предложено восстановить из копии', /Данные стёрты/.test(html()) && !!$('[data-act="open-data"]'));
+
+  // восстановление из копии, снятой до стирания
+  const parsed = backup.readBackup(JSON.stringify(good));
+  await backup.importBackup(parsed.data);
+  await refresh();
+  equal('данные вернулись из копии', (await db.listIncomes()).length, 1);
+  check('PIN из копии не вернулся (это защита, а не потеря)', (await db.getSettings()).pinHash === null);
+}
+
+section('35. Надёжность: постоянное хранилище и подсказка об установке');
+{
+  // 1) отказ в постоянном хранилище виден в «Ещё»
+  await db.saveSettings({ persistState: 'denied' });
+  await refresh();
+  $('.tab[data-tab="more"]').click();
+  await sleep(40);
+  check('в «Ещё» предупреждение про хранилище', /не разрешил постоянное хранилище/.test(normalize(html())));
+  $('[data-act="open-settings"]').click();
+  await sleep(60);
+  check('в настройках сказано про отказ', /не разрешено/.test(normalize(html())));
+  check('есть кнопка повторного запроса', !!$('[data-act="persist-retry"]'));
+
+  await db.saveSettings({ persistState: 'granted' });
+  await refresh();
+  $('.tab[data-tab="more"]').click();
+  await sleep(40);
+  check('при разрешении предупреждения нет', !/не разрешил постоянное хранилище/.test(normalize(html())));
+
+  // 2) подсказка об установке: показывается в браузере, скрывается в установленном приложении
+  await db.saveSettings({ installHintShown: false });
+  await refresh();
+  const hint = app.maybeShowInstallHint();     // окно ждёт ответа пользователя
+  await sleep(80);
+  check('подсказка появилась в браузере', /Сначала установите приложение/.test(normalize($('.sheet h2').textContent)));
+  check('сказано про отдельные хранилища', /разные хранилища данных/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="ok"]').click();          // «Как установить»
+  await sleep(80);
+  check('открылась инструкция', /Установка на экран «Домой»/.test($('.sheet h2').textContent));
+  $('[data-sheet="ok"]').click();
+  await hint;
+  await sleep(60);
+  equal('подсказка больше не покажется', (await db.getSettings()).installHintShown, true);
+
+  expose('navigator', { ...window.navigator, standalone: true });
+  await db.saveSettings({ installHintShown: false });
+  await refresh();
+  const hintInApp = app.maybeShowInstallHint();
+  await sleep(80);
+  check('в установленном приложении подсказки нет', !$('.sheet'));
+  await hintInApp;
+  equal('флаг подсказки не тронут', (await db.getSettings()).installHintShown, false);
+  expose('navigator', { ...window.navigator, standalone: false });
+}
+
+
+/* ═══════════════════════════ 36. Иконки, манифест и надёжность хранилища ═══════════════════════════ */
+
+section('36. Иконки и манифест для установки на iPhone');
+{
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const rootDir = ROOT;   // ROOT — это папка vakhta/
+
+  /** Размеры PNG читаем из заголовка файла: 4 байта ширины и высоты после сигнатуры. */
+  function pngSize(file) {
+    const bytes = fs.readFileSync(file);
+    const isPng = bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    if (!isPng) return null;
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+
+  const icons = [
+    ['icons/icon-192.png', 192],
+    ['icons/icon-512.png', 512],
+    ['icons/icon-maskable-512.png', 512],
+    ['icons/apple-touch-icon.png', 180],
+    ['icons/favicon-32.png', 32],
+  ];
+
+  for (const [rel, size] of icons) {
+    const file = path.join(rootDir, rel);
+    check(`${rel} существует`, fs.existsSync(file));
+    const dims = fs.existsSync(file) ? pngSize(file) : null;
+    check(`${rel} — настоящий PNG (не заглушка)`, !!dims);
+    check(`${rel} нужного размера ${size}×${size}`, !!dims && dims.width === size && dims.height === size);
+  }
+
+  // манифест ссылается на существующие файлы и совпадает с ними по размерам
+  const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, 'manifest.json'), 'utf8'));
+  equal('манифест: имя приложения', manifest.name, 'Счётчик вахты');
+  equal('манифест: короткое имя', manifest.short_name, 'Вахта');
+  equal('манифест: запуск из своей же папки', manifest.start_url, './index.html');
+  equal('манифест: область ограничена папкой', manifest.scope, './');
+  equal('манифест: полноэкранный режим', manifest.display, 'standalone');
+  equal('манифест: тёмный фон', manifest.background_color, '#0E0F11');
+  check('манифест: язык русский', manifest.lang === 'ru');
+  check('манифест: все пути относительные',
+    manifest.icons.every((icon) => icon.src.startsWith('./')) && manifest.start_url.startsWith('./'));
+
+  const purposes = manifest.icons.map((icon) => icon.purpose);
+  check('манифест: есть обычная иконка', purposes.includes('any'));
+  check('манифест: есть маска для Android', purposes.includes('maskable'));
+
+  for (const icon of manifest.icons) {
+    const file = path.join(rootDir, icon.src);
+    check(`манифест: ${icon.src} на месте`, fs.existsSync(file));
+    const dims = fs.existsSync(file) ? pngSize(file) : null;
+    const [w] = icon.sizes.split('x');
+    check(`манифест: размер ${icon.sizes} совпадает с файлом`, !!dims && dims.width === Number(w));
+    equal(`манифест: тип ${icon.src} — png`, icon.type, 'image/png');
+  }
+
+  // иконка для iPhone и манифест подключены в самой странице
+  const page = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
+  check('страница подключает манифест', /<link rel="manifest" href="\.\/manifest\.json"/.test(page));
+  check('страница задаёт иконку для iPhone', /rel="apple-touch-icon"[^>]*href="\.\/icons\/apple-touch-icon\.png"/.test(page));
+  check('страница подключает favicon', /rel="icon"[^>]*favicon-32\.png/.test(page));
+  check('страница просит тёмную тему у системы', /name="color-scheme" content="dark"/.test(page));
+  check('страница учитывает «вырез» iPhone', /viewport-fit=cover/.test(page));
+  check('страница разрешает запуск на весь экран', /apple-mobile-web-app-capable" content="yes"/.test(page));
+
+  // все иконки должны попасть в офлайн-кэш, иначе после установки будет пустой значок
+  const swText = fs.readFileSync(path.join(rootDir, 'sw.js'), 'utf8');
+  for (const [rel] of icons) {
+    check(`офлайн-кэш содержит ${rel}`, swText.includes(`./${rel}`));
+  }
+  check('офлайн-кэш содержит модуль PIN', swText.includes("./lock.js"));
+}
+
+section('37. Надёжность хранилища');
+{
+  // в jsdom у navigator нет storage — проверяем запасные пути
+  expose('navigator', { ...window.navigator });
+  equal('без поддержки API — «не поддерживается»', await db.requestPersistentStorage(), 'unsupported');
+  equal('без поддержки API объём неизвестен', await db.storageEstimate(), null);
+
+  expose('navigator', {
+    ...window.navigator,
+    storage: {
+      persisted: async () => false,
+      persist: async () => true,
+      estimate: async () => ({ usage: 3 * 1024 * 1024, quota: 1024 * 1024 * 1024 }),
+    },
+  });
+  equal('разрешение выдано', await db.requestPersistentStorage(), 'granted');
+  const estimate = await db.storageEstimate();
+  equal('объём данных прочитан', estimate.usage, 3 * 1024 * 1024);
+  equal('квота прочитана', estimate.quota, 1024 * 1024 * 1024);
+
+  expose('navigator', {
+    ...window.navigator,
+    storage: { persisted: async () => true, persist: async () => false, estimate: async () => { throw new Error('нет'); } },
+  });
+  equal('уже разрешено — повторно не спрашиваем', await db.requestPersistentStorage(), 'granted');
+  equal('ошибка оценки объёма не ломает экран', await db.storageEstimate(), null);
+
+  expose('navigator', {
+    ...window.navigator,
+    storage: { persisted: async () => false, persist: async () => false, estimate: async () => ({}) },
+  });
+  equal('отказ браузера распознан', await db.requestPersistentStorage(), 'denied');
+  equal('пустая оценка — нули, а не ошибка', (await db.storageEstimate()).usage, 0);
+
+  expose('navigator', { ...window.navigator, standalone: false });
+}
+
+section('38. Суммы: только целые рубли и сохранение ввода при ошибке');
+{
+  // 1) сам разбор суммы: заодно проверяем, что «1500,50» — это ошибка, а не 150050
+  const ok = (text) => app.parseAmount(text).value;
+  const bad = (text) => app.parseAmount(text).error;
+
+  equal('обычное число', ok('1500'), 1500);
+  equal('пробелы по краям не мешают', ok('  2000  '), 2000);
+  equal('пробел как разделитель разрядов', ok('50 000'), 50000);
+  equal('неразрывный пробел из iPhone-клавиатуры', ok('50\u00a0000'), 50000);
+  equal('точка как разделитель разрядов', ok('50.000'), 50000);
+  equal('запятая как разделитель разрядов', ok('50,000'), 50000);
+  equal('четыре разряда группами', ok('1 234 567'), 1234567);
+
+  check('копейки через запятую — ошибка', /целое число/.test(bad('1500,50')));
+  check('копейки через точку — ошибка', /целое число/.test(bad('1500.50')));
+  check('«1500,5» — ошибка', /целое число/.test(bad('1500,5')));
+  check('один разделитель без разрядов — ошибка', /целое число/.test(bad('1.5')));
+  check('буквы — ошибка', /целое число/.test(bad('много')));
+  check('пусто — «Введите сумму»', /Введите сумму/.test(bad('')));
+  check('ноль — «больше нуля»', /больше нуля/.test(bad('0')));
+  check('слишком большое — ошибка', /Слишком большая/.test(bad('1000000000')));
+  check('истёкший ноль после разбора не проходит', !app.parseAmount('0').value);
+
+  // 2) тот же разбор работает в настоящей форме расхода
+  await db.clear('expenses');
+  await refresh();
+  $('.tab[data-tab="expenses"]').click();
+  await sleep(40);
+  $('[data-act="expense-new"]').click();
+  await sleep(80);
+  const form = $('#expense-form');
+  check('форма расхода открыта', !!form);
+
+  const tryAmount = async (value) => {
+    form.elements.amount.value = value;
+    form.elements.date.value = D.todayKey();
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await sleep(120);
+  };
+
+  await tryAmount('0');
+  check('ноль отклонён', /Сумма должна быть больше нуля/.test(normalize(html())));
+  equal('ноль не сохранился', (await db.listExpenses()).length, 0);
+  equal('введённое значение осталось в поле', form.elements.amount.value, '0');
+
+  await tryAmount('1500,50');
+  check('копейки отклонены', /Введите целое число/.test(normalize(html())));
+  equal('копейки не превратились в 150050', (await db.listExpenses()).length, 0);
+  equal('текст с копейками не потерян', form.elements.amount.value, '1500,50');
+
+  await tryAmount('много');
+  equal('буквы не сохранились', (await db.listExpenses()).length, 0);
+  equal('буквы остались в поле', form.elements.amount.value, 'много');
+
+  await tryAmount('1 500');
+  await sleep(120);
+  const saved = await db.listExpenses();
+  equal('целая сумма с пробелом сохранена', saved.length, 1);
+  equal('сумма записана как число', saved[0].amount, 1500);
+  check('сумма без копеек', Number.isInteger(saved[0].amount));
 }
 
 /* ═══════════════════════════ итог ═══════════════════════════ */

@@ -51,13 +51,15 @@ export const DEFAULT_CATEGORIES = [
 export const DEFAULT_SETTINGS = {
   pinHash: null,          // SHA-256(PIN + соль), null — вход по PIN выключен
   pinSalt: null,          // случайная соль (hex)
-  pinFailed: 0,           // счётчик неверных попыток (для паузы)
+  pinFailed: 0,           // неверных попыток подряд (для паузы)
+  pinPauses: 0,           // сколько раз уже была пауза — от неё зависит её длина
   pinLockUntil: 0,        // до какого времени заблокирован ввод (timestamp)
   lastBackupAt: null,     // когда последний раз сохраняли копию (ключ даты)
   dirtyAfterBackup: false,// были ли изменения после последней копии
   persistState: null,     // результат navigator.storage.persist(): 'granted' | 'denied' | 'unsupported'
   backupSnoozeUntil: null,// до какого времени скрыто напоминание о копии (timestamp)
-  firstRunDone: false,    // показывали ли подсказку про установку на экран «Домой»
+  firstRunDone: false,    // первый запуск обработан (запросили постоянное хранилище)
+  installHintShown: false,// показывали ли подсказку про установку на экран «Домой»
 };
 
 const STORES = {
@@ -473,6 +475,28 @@ export function replaceAll({ shifts, incomes, expenses, categories, attachments,
     for (const attachment of attachments) attachmentsStore.put(attachment);
     if (settings) meta.put({ key: 'settings', value: settings });
   });
+}
+
+/* ─────────────────────────── полное стирание ─────────────────────────── */
+
+/**
+ * Стирает базу целиком: нужно для честного сценария «Забыл PIN»,
+ * когда войти можно только начав с чистого листа.
+ * После стирания база создаётся заново — уже пустая, со стартовыми категориями.
+ */
+export async function eraseDatabase() {
+  const connection = dbPromise ? await dbPromise.catch(() => null) : null;
+  if (connection) connection.close();
+  dbPromise = null;
+
+  await new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error || new Error('Не удалось стереть данные'));
+    request.onblocked = () => reject(new Error('База занята другой вкладкой — закройте её и попробуйте снова'));
+  });
+
+  await init();   // сразу создаём пустую базу, чтобы приложение работало дальше
 }
 
 /* ─────────────────────────── запуск хранилища ─────────────────────────── */

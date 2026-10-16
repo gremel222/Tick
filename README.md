@@ -25,12 +25,14 @@
 ## ⏱ Счётчик вахты (раздел сайта)
 
 Мобильное PWA для учёта вахты: отсчёт дней, заработок и расходы, расчётные
-листки. Полностью офлайн, данные хранятся на устройстве (IndexedDB), без сервера:
+листки, резервные копии и вход по PIN. Полностью офлайн, данные хранятся
+на устройстве (IndexedDB), без сервера:
 **https://gremel222.github.io/Tick/vakhta/** (исходники — `vakhta/`, публикация —
 `docs/vakhta/` через `scripts/build-pages.sh`).
 
 ```bash
-cd vakhta/tests && npm install && npm test   # 79 проверок логики
+node vakhta/tools/serve.mjs                  # локально: http://localhost:4173/vakhta/
+cd vakhta/tests && npm install && npm test   # 531 проверка логики
 ```
 
 ## 🎓 Академия Blender (раздел сайта)

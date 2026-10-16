@@ -534,6 +534,48 @@ html.viewer-open { overflow: hidden; }
 .dot--accent { background: var(--accent); }
 .dot--warn { background: var(--warn); }
 
+/* ─────────────────────────── экран входа по PIN ─────────────────────────── */
+.lock {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  padding: 40px 0 0;
+  max-width: 340px;
+  margin: 0 auto;
+}
+.lock__icon {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 176, 0, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.lock__icon svg { width: 30px; height: 30px; }
+.lock__title { font-size: 20px; }
+.lock__form { display: grid; gap: 10px; width: 100%; justify-items: center; }
+.lock__input {
+  text-align: center;
+  font-size: 28px;
+  letter-spacing: 0.35em;
+  padding-left: 0.35em;      /* компенсируем межбуквенный интервал */
+  height: 60px;
+}
+.lock__form .btn { width: 100%; }
+.lock__note { max-width: 34ch; }
+
+/* «Занавес» на время, пока приложение в фоне: в переключателе приложений
+   не видно сумм и названий. Появляется только при включённом PIN. */
+body.is-veiled::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: var(--bg);
+}
+
 /* ─────────────────────────── формы ─────────────────────────── */
 .field { display: grid; gap: 6px; }
 .field__label { font-size: 13px; color: var(--muted); }
@@ -662,7 +704,9 @@ html.viewer-open { overflow: hidden; }
 .kv { display: grid; gap: 8px; }
 .kv__row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .kv__row dt { color: var(--muted); font-size: 14px; }
-.kv__row dd { margin: 0; font-family: var(--mono); font-size: 15px; }
+.kv__row dd { margin: 0; font-family: var(--mono); font-size: 15px; text-align: right; }
+.kv__row dd.ok { color: var(--ok); }
+.kv__row dd.warn { color: var(--danger); font-family: inherit; font-size: 14px; }
 
 .offline-hint { font-size: 12px; color: var(--dim); text-align: center; }
 
