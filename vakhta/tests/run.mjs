@@ -79,12 +79,16 @@ window.URL.createObjectURL = (blob) => {
 };
 window.URL.revokeObjectURL = () => {};
 expose('URL', window.URL);
+// Blob и File берём из Node: IndexedDB клонирует их корректно, а jsdom-овские — нет
+expose('Blob', NodeBlob);
+expose('File', NodeFile);
 
 // app.js выполняется ради побочного эффекта (рисует интерфейс и кладёт своё в window.vakhta)
 await import(`${ROOT}app.js?test=${Date.now()}`);
 const D = await import(`${ROOT}dates.js`);
 const db = await import(`${ROOT}db.js`);
 const F = await import(`${ROOT}files.js`);
+const backup = await import(`${ROOT}backup.js`);
 const app = window.vakhta;
 
 await sleep(80);   // ждём завершения boot()
@@ -1096,6 +1100,375 @@ section('22. Сравнение вахт');
   await db.clear('shifts');
   await refresh();
   check('пустое состояние сравнения', /Сравнивать пока нечего/.test(html()));
+}
+
+
+/* ═══════════════════════════ 23. Резервная копия ═══════════════════════════ */
+
+section('23. Копия: сборка файла');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  await db.clear('expenses');
+  await db.clear('incomes');
+  await db.clear('shifts');
+  await db.clear('attachments');
+
+  const shiftId = await db.addShift({ arrival: key(-10), workStart: key(-9), workEnd: key(9) });
+  const incomeId = await db.addIncome({ shiftId, amount: 60000, date: key(-3), category: 'аванс', note: 'первый аванс' });
+  await db.addExpense({ shiftId, amount: 2500, date: key(-2), categoryId: 'food', note: 'продукты' });
+  const attachmentId = await db.addAttachment({
+    incomeId, shiftId, name: 'расчётка.pdf', type: 'application/pdf', size: 2048,
+    blob: new NodeBlob([new Uint8Array([1, 2, 3, 4, 5])]), compressed: false,
+  });
+  await db.updateIncome({ ...(await db.get('incomes', incomeId)), attachments: [attachmentId] });
+  await refresh();
+
+  const data = await backup.buildBackup();
+  equal('формат копии', data.format, 'vakhta-backup');
+  equal('версия схемы в копии', data.schemaVersion, db.SCHEMA_VERSION);
+  check('в копии есть дата создания', typeof data.createdAt === 'string' && data.createdAt.length > 10);
+  equal('в копии одна вахта', data.shifts.length, 1);
+  equal('в копии одно поступление', data.incomes.length, 1);
+  equal('в копии один расход', data.expenses.length, 1);
+  equal('в копии одно вложение', data.attachments.length, 1);
+  check('вложения в base64', typeof data.attachments[0].data === 'string' && /^[A-Za-z0-9+/=]+$/.test(data.attachments[0].data));
+  equal('base64 разворачивается в те же байты', F.base64ToBlob(data.attachments[0].data, 'application/pdf').size, 5);
+  check('в копии нет PIN', !('pinHash' in data.settings) && !('pinSalt' in data.settings));
+  equal('имя файла копии', backup.backupFileName('2026-10-16'), 'вахта-копия-16.10.2026.json');
+
+  // текстовое представление: копия переживает JSON.stringify/parse
+  const text = JSON.stringify(data);
+  check('копия сериализуется в текст', text.length > 200);
+}
+
+section('24. Копия: проверка файла');
+{
+  const good = await backup.buildBackup();
+
+  check('своя копия проходит проверку', backup.readBackup(JSON.stringify(good)).ok === true);
+
+  const broken = (patch) => backup.readBackup(JSON.stringify({ ...good, ...patch }));
+  const withOneIncome = (patch) => backup.readBackup(JSON.stringify({
+    ...good, incomes: [{ ...good.incomes[0], ...patch }],
+  }));
+
+  equal('не JSON отклоняется', backup.readBackup('это не json').ok, false);
+  equal('чужой файл отклоняется', broken({ format: 'something-else' }).error, 'Файл создан не приложением «Счётчик вахты»');
+  check('файл новее приложения отклоняется',
+    /Более новой версией|более новой версией/.test(broken({ schemaVersion: db.SCHEMA_VERSION + 1 }).error));
+  check('отсутствие раздела ловится', /нет раздела/.test(broken({ expenses: undefined }).error));
+  check('нулевая сумма отклоняется', withOneIncome({ amount: 0 }).ok === false);
+  check('дробная сумма отклоняется', withOneIncome({ amount: 1500.5 }).ok === false);
+  check('битая дата отклоняется', withOneIncome({ date: '2026-13-01' }).ok === false);
+  check('повтор id ловится', backup.readBackup(JSON.stringify({
+    ...good, incomes: [good.incomes[0], good.incomes[0]],
+  })).ok === false);
+  check('пересекающиеся вахты в копии ловятся', backup.readBackup(JSON.stringify({
+    ...good,
+    shifts: [
+      { id: 1, arrival: '2026-10-01', workStart: '2026-10-01', workEnd: '2026-10-20' },
+      { id: 2, arrival: '2026-10-10', workStart: '2026-10-10', workEnd: '2026-10-30' },
+    ],
+  })).ok === false);
+  check('битый base64 отклоняется', backup.readBackup(JSON.stringify({
+    ...good, attachments: [{ ...good.attachments[0], data: '###не base64###' }],
+  })).ok === false);
+  check('вложение без поступления отклоняется', backup.readBackup(JSON.stringify({
+    ...good, attachments: [{ ...good.attachments[0], incomeId: 999 }],
+  })).ok === false);
+
+  // «лечим» целостность: ссылки на отсутствующие вахту и категорию
+  const patched = backup.readBackup(JSON.stringify({
+    ...good,
+    incomes: good.incomes.map((income) => ({ ...income, shiftId: 777 })),
+    expenses: good.expenses.map((expense) => ({ ...expense, categoryId: 'нет-такой' })),
+  }));
+  check('такая копия принимается с исправлениями', patched.ok === true);
+  equal('поступление отвязано от несуществующей вахты', patched.data.incomes[0].shiftId, null);
+  equal('расход перенесён в «прочее»', patched.data.expenses[0].categoryId, 'other');
+  check('исправления перечислены', patched.fixes.length >= 2);
+
+  // категория «прочее» восстанавливается, если её нет в копии
+  const withoutOther = backup.readBackup(JSON.stringify({
+    ...good, categories: good.categories.filter((category) => category.id !== 'other'),
+    expenses: good.expenses.map((expense) => ({ ...expense, categoryId: 'food' })),
+  }));
+  check('«прочее» возвращается на место', withoutOther.ok === true
+    && withoutOther.data.categories.some((category) => category.id === 'other'));
+}
+
+section('25. Копия: восстановление данных');
+{
+  const good = await backup.buildBackup();
+
+  // портим текущие данные, чтобы увидеть замену
+  await db.clear('incomes');
+  await refresh();
+  equal('поступлений больше нет', (await db.listIncomes()).length, 0);
+
+  const parsed = backup.readBackup(JSON.stringify(good));
+  await backup.importBackup(parsed.data);
+  await refresh();
+
+  equal('поступления вернулись', (await db.listIncomes()).length, 1);
+  equal('вахты на месте', (await db.listShifts()).length, 1);
+  equal('расходы на месте', (await db.listExpenses()).length, 1);
+  equal('вложения на месте', (await db.getAll('attachments')).length, 1);
+
+  const restoredAttachment = (await db.getAll('attachments'))[0];
+  check('файл вложения восстановлен как Blob', restoredAttachment.blob && restoredAttachment.blob.size === 5);
+  const restoredIncome = (await db.listIncomes())[0];
+  equal('id вложения сохранён в поступлении', restoredIncome.attachments.length, 1);
+  check('восстановленный PIN не появился', (await db.getSettings()).pinHash === null);
+  check('после импорта копия считается свежей', (await db.getSettings()).dirtyAfterBackup === false);
+
+  // атомарность: если данные сломаны, старые остаются нетронутыми
+  const before = (await db.listIncomes()).length;
+  let failed = false;
+  try {
+    await db.replaceAll({
+      // NaN — недопустимый ключ: IndexedDB обязана откатить транзакцию целиком
+      shifts: [{ id: Number.NaN, arrival: '2026-10-01', workStart: '2026-10-01', workEnd: '2026-10-10' }],
+      incomes: [], expenses: [], attachments: [],
+      categories: [{ id: 'other', name: 'прочее', order: 999, fixed: true }],
+      settings: null,
+    });
+  } catch (error) {
+    failed = true;
+  }
+  check('сломанный импорт завершился ошибкой', failed);
+  equal('после ошибки поступления целы', (await db.listIncomes()).length, before);
+  equal('после ошибки вахты целы', (await db.listShifts()).length, 1);
+  equal('после ошибки расходы целы', (await db.listExpenses()).length, 1);
+}
+
+section('26. Выписка CSV');
+{
+  const shifts = await db.listShifts();
+  const incomes = await db.listIncomes();
+  const expenses = await db.listExpenses();
+  const categories = await db.listCategories();
+
+  const csv = backup.buildCsv({ shifts, incomes, expenses, categories }, '2026-10-16');
+  check('начинается с BOM', csv.startsWith('\uFEFF'));
+  check('заголовок с разделителем «;»', csv.includes('Дата;Тип;Вахта;Категория;Сумма;Заметка'));
+  check('строки разделены CRLF', csv.includes('\r\n'));
+  check('есть поступление', /Поступление/.test(csv));
+  check('есть расход', /Расход/.test(csv));
+  check('сумма без разделителей разрядов', csv.includes(';60000;'));
+  check('вахта в виде диапазона', csv.includes(D.formatRange(shifts[0].arrival, shifts[0].workEnd)));
+  check('имя файла выписки', backup.csvFileName('2026-10-16') === 'вахта-выписка-16.10.2026.csv');
+
+  // экранирование и «Без вахты»
+  const tricky = backup.buildCsv({
+    shifts: [],
+    categories: [{ id: 'other', name: 'прочее', fixed: true }],
+    incomes: [{ id: 1, shiftId: null, amount: 1000, date: '2026-10-05', category: 'прочее', note: 'молоко; хлеб "свежий"', attachments: [] }],
+    expenses: [{ id: 2, shiftId: null, amount: 500, date: '2026-10-06', categoryId: 'other', note: 'перенос\nстроки' }],
+  }, '2026-10-16');
+  check('нет вахты — пишем «Без вахты»', tricky.includes('Без вахты'));
+  check('точка с запятой и кавычки экранированы', tricky.includes('"молоко; хлеб ""свежий"""'));
+  check('перевод строки в заметке заменён пробелом', tricky.includes('перенос строки'));
+  check('итоговые строки посчитаны', /итог по поступлениям: 1000/.test(tricky) && /итог по расходам: 500/.test(tricky));
+
+  // порядок: от старых к новым
+  const ordered = backup.buildCsv({
+    shifts: [], categories: [{ id: 'other', name: 'прочее', fixed: true }],
+    incomes: [
+      { id: 1, shiftId: null, amount: 100, date: '2026-10-10', category: 'прочее', note: 'позже', attachments: [] },
+      { id: 2, shiftId: null, amount: 200, date: '2026-10-01', category: 'прочее', note: 'раньше', attachments: [] },
+    ],
+    expenses: [],
+  }, '2026-10-16');
+  check('в выписке старые записи выше', ordered.indexOf('раньше') < ordered.indexOf('позже'));
+}
+
+section('27. Напоминание о копии и экспорт через интерфейс');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+
+  // чистое состояние: данные есть, копии не было
+  await db.clear('expenses');
+  await db.clear('incomes');
+  await db.clear('shifts');
+  await db.clear('attachments');
+  const shiftId = await db.addShift({ arrival: key(-5), workStart: key(-5), workEnd: key(10) });
+  await db.addIncome({ shiftId, amount: 40000, date: key(-1), category: 'аванс', note: '' });
+  await db.saveSettings({ lastBackupAt: null, dirtyAfterBackup: false, backupSnoozeUntil: null });
+  await refresh();
+  $('.tab[data-tab="home"]').click();     // напоминание живёт на главном экране
+  await sleep(30);
+
+  check('без изменений напоминания нет', !/Копии ещё не было/.test(html()));
+
+  // после изменения (добавили поступление) — напоминание появляется
+  await db.markDirty();
+  await refresh();
+  check('после изменений напоминание появилось', /Копии ещё не было/.test(html()));
+  check('в напоминании есть кнопки', !!$('[data-act="backup-export"]') && !!$('[data-act="backup-snooze"]'));
+
+  // «скрыть на 24 часа»
+  $('[data-act="backup-snooze"]').click();
+  await sleep(80);
+  check('после отсрочки напоминания нет', !/Копии ещё не было/.test(html()));
+  check('отсрочка сохранена', (await db.getSettings()).backupSnoozeUntil > Date.now());
+
+  // правило семи дней: отсрочка снята, но появилось новое поступление — напоминаем
+  await db.saveSettings({ backupSnoozeUntil: null, lastBackupAt: key(-8), dirtyAfterBackup: true });
+  await refresh();
+  check('спустя неделю напоминание снова есть', /Копия данных устарела/.test(html()));
+
+  // экспорт копии из напоминания: подменяем «Поделиться» на заглушку
+  const sharedFiles = [];
+  expose('navigator', {
+    ...window.navigator,
+    canShare: () => true,
+    share: async ({ files }) => { sharedFiles.push(files[0]); },
+  });
+  $('[data-act="backup-export"]').click();
+  await sleep(400);
+
+  equal('файл отправлен в «Поделиться»', sharedFiles.length, 1);
+  check('имя файла копии правильное', /^вахта-копия-\d{2}\.\d{2}\.\d{4}\.json$/.test(sharedFiles[0].name));
+  check('тип файла JSON', sharedFiles[0].type === 'application/json');
+
+  const settings = await db.getSettings();
+  equal('дата копии записана', settings.lastBackupAt, D.todayKey());
+  equal('флаг изменений снят', settings.dirtyAfterBackup, false);
+  check('после копии напоминания нет', !/Копия данных устарела|Копии ещё не было/.test(html()));
+
+  // текст копии, отданной в «Поделиться», — валидный файл копии
+  const sharedText = await sharedFiles[0].text();
+  const parsed = backup.readBackup(sharedText);
+  check('отданный файл проходит проверку', parsed.ok === true);
+  equal('в отданном файле одно поступление', parsed.summary.incomes, 1);
+}
+
+section('28. Импорт через интерфейс и экран «Копия и экспорт»');
+{
+  const key = (offset) => D.addDays(D.todayKey(), offset);
+  const good = await backup.buildBackup();
+
+  // экран
+  $('.tab[data-tab="more"]').click();
+  await sleep(30);
+  $('[data-act="open-data"]').click();
+  await sleep(50);
+  equal('экран открылся', text('#app-title'), 'Копия и экспорт');
+  check('кнопки копии и CSV на месте', !!$('[data-act="backup-export"]') && !!$('[data-act="backup-import"]') && !!$('[data-act="csv-export"]'));
+  check('показана дата последней копии', /Последняя копия/.test(html()));
+
+  // CSV через интерфейс
+  const csvFiles = [];
+  expose('navigator', {
+    ...window.navigator,
+    canShare: () => true,
+    share: async ({ files }) => { csvFiles.push(files[0]); },
+  });
+  $('[data-act="csv-export"]').click();
+  await sleep(400);
+  equal('CSV отдан в «Поделиться»', csvFiles.length, 1);
+  check('имя CSV правильное', /^вахта-выписка-\d{2}\.\d{2}\.\d{4}\.csv$/.test(csvFiles[0].name));
+  // BOM нужно смотреть в байтах: Blob.text() по стандарту убирает его при чтении
+  const csvBytes = new Uint8Array(await csvFiles[0].arrayBuffer());
+  const csvText = await csvFiles[0].text();
+  check('в CSV есть BOM (байты EF BB BF)', csvBytes[0] === 0xEF && csvBytes[1] === 0xBB && csvBytes[2] === 0xBF);
+  check('в CSV есть заголовок с «;»', csvText.includes('Дата;Тип;Вахта;Категория;Сумма;Заметка'));
+
+  // импорт: испорченный файл
+  const input = $('#backup-file');
+  const badFile = new NodeFile(['это точно не копия'], 'мусор.json', { type: 'application/json' });
+  Object.defineProperty(input, 'files', { value: [badFile], configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  check('показано предупреждение о файле', /Файл не подошёл/.test($('.sheet h2').textContent));
+  check('сказано, что данные не тронуты', /Текущие данные не тронуты/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="ok"]').click();
+  await sleep(60);
+
+  // импорт: копия от более новой версии приложения
+  const futureFile = new NodeFile([JSON.stringify({ ...good, schemaVersion: db.SCHEMA_VERSION + 1 })], 'новая.json', { type: 'application/json' });
+  Object.defineProperty(input, 'files', { value: [futureFile], configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  check('новая версия схемы отклонена', /поддерживается/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="ok"]').click();
+  await sleep(60);
+
+  // импорт: нормальная копия, но пользователь отменяет
+  await db.clear('incomes');
+  await refresh();
+  const validFile = new NodeFile([JSON.stringify(good)], 'копия.json', { type: 'application/json' });
+  Object.defineProperty(input, 'files', { value: [validFile], configurable: true });
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(250);
+  check('показали сводку по копии', /Восстановить данные из копии\?/.test($('.sheet h2').textContent));
+  check('в сводке есть количество записей', /1 вахт, 1 поступлений/.test(normalize($('.sheet p').textContent)));
+  check('предупреждение о замене', /Все текущие данные будут заменены/.test(normalize($('.sheet p').textContent)));
+  $('[data-sheet="cancel"]').click();
+  await sleep(80);
+  equal('после отмены данные не изменились', (await db.listIncomes()).length, 0);
+
+  // импорт: подтверждаем — данные восстанавливаются
+  input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(250);
+  $('[data-sheet="ok"]').click();
+  await sleep(400);
+  equal('данные восстановлены', (await db.listIncomes()).length, 1);
+  check('на экране появилось сообщение', /Данные восстановлены из копии/.test(normalize($('#toast-root').textContent)));
+}
+
+section('29. Запасные пути: скачивание вместо «Поделиться» и отмена');
+{
+  // 1) «Поделиться» недоступно (или не умеет файлы) — файл должен скачаться
+  expose('navigator', { ...window.navigator });
+  const downloaded = await F.saveFile(new NodeBlob(['проверка'], { type: 'text/plain' }), 'тест.txt');
+  equal('без «Поделиться» файл скачивается', downloaded, 'downloaded');
+
+  // 2) пользователь закрыл окно «Поделиться» — копия не считается сделанной
+  await db.saveSettings({ lastBackupAt: null, dirtyAfterBackup: true, backupSnoozeUntil: null });
+  await refresh();
+  expose('navigator', {
+    ...window.navigator,
+    canShare: () => true,
+    share: async () => {
+      const error = new Error('отмена');
+      error.name = 'AbortError';
+      throw error;
+    },
+  });
+  $('.tab[data-tab="home"]').click();
+  await sleep(30);
+  $('[data-act="backup-export"]').click();
+  await sleep(300);
+
+  const settings = await db.getSettings();
+  equal('отмена не отметила копию сделанной', settings.lastBackupAt, null);
+  equal('флаг изменений остался', settings.dirtyAfterBackup, true);
+  check('напоминание никуда не делось', /Копии ещё не было/.test(html()));
+}
+
+section('30. Целостность офлайн-кэша и публикации');
+{
+  const swSource = readFileSync(`${ROOT}sw.js`, 'utf8');
+  const appSource = readFileSync(`${ROOT}app.js`, 'utf8');
+
+  // все модули, которые подключает приложение
+  const imported = Array.from(appSource.matchAll(/from '\.\/([\w.-]+)'/g)).map((match) => match[1]);
+  check('приложение подключает модули', imported.length >= 4);
+
+  // всё, что перечислено в кэше service worker
+  const cached = Array.from(swSource.matchAll(/'\.\/([\w./-]+)'/g)).map((match) => match[1]);
+  for (const module of imported) {
+    check(`модуль ${module} попадёт в офлайн-кэш`, cached.includes(module));
+  }
+  check('стили в кэше', cached.includes('style.css'));
+  check('страница в кэше', cached.includes('index.html'));
+  check('манифест в кэше', cached.includes('manifest.json'));
+  check('иконки для установки в кэше', cached.includes('icons/apple-touch-icon.png') && cached.includes('icons/icon-192.png'));
+  check('версия кэша указана и не пустая', /const CACHE_VERSION = 'v\d+';/.test(swSource));
+  check('версии приложения и кэша совпадают',
+    swSource.match(/CACHE_VERSION = '(v\d+)'/)[1] === appSource.match(/SW_VERSION = '(v\d+)'/)[1]);
 }
 
 /* ═══════════════════════════ итог ═══════════════════════════ */

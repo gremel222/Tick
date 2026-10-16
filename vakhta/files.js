@@ -296,3 +296,66 @@ export function storageErrorMessage(error) {
   }
   return 'Не удалось сохранить';
 }
+
+/* ─────────────────────────── base64 и сохранение файлов ─────────────────────────── */
+
+/**
+ * Blob → base64 (без префикса «data:...»).
+ * Конвертируем кусками: у больших PDF иначе переполняется стек вызовов.
+ */
+export async function blobToBase64(blob) {
+  const buffer = new Uint8Array(await blob.arrayBuffer());
+  const chunk = 0x8000;
+  let binary = '';
+  for (let i = 0; i < buffer.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, buffer.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/** base64 → Blob с нужным типом. Бросает ошибку, если строка повреждена. */
+export function base64ToBlob(base64, type) {
+  const binary = atob(String(base64 || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: type || 'application/octet-stream' });
+}
+
+/** Скачивание файла обычной ссылкой — запасной путь, если «Поделиться» недоступно. */
+export function downloadFile(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // освобождаем ссылку не сразу: Safari иначе может не успеть начать скачивание
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/**
+ * Сохраняет файл: сначала через «Поделиться» (на iPhone это «Сохранить в Файлы»,
+ * iCloud, почта), иначе — обычным скачиванием.
+ * Возвращает 'shared' | 'downloaded' | 'cancelled'.
+ */
+export async function saveFile(blob, filename, { title = '', text = '' } = {}) {
+  const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+  const canShare = typeof navigator !== 'undefined' && navigator.canShare && navigator.share
+    && navigator.canShare({ files: [file] });
+
+  if (canShare) {
+    try {
+      await navigator.share({ files: [file], title, text });
+      return 'shared';
+    } catch (error) {
+      if (error && (error.name === 'AbortError' || error.name === 'NotAllowedError')) return 'cancelled';
+      // если «Поделиться» почему-то не сработало — пробуем скачать
+      console.warn('Поделиться не получилось, скачиваем файл:', error);
+    }
+  }
+
+  downloadFile(blob, filename);
+  return 'downloaded';
+}

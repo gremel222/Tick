@@ -56,6 +56,7 @@ export const DEFAULT_SETTINGS = {
   lastBackupAt: null,     // когда последний раз сохраняли копию (ключ даты)
   dirtyAfterBackup: false,// были ли изменения после последней копии
   persistState: null,     // результат navigator.storage.persist(): 'granted' | 'denied' | 'unsupported'
+  backupSnoozeUntil: null,// до какого времени скрыто напоминание о копии (timestamp)
   firstRunDone: false,    // показывали ли подсказку про установку на экран «Домой»
 };
 
@@ -352,7 +353,10 @@ export async function listIncomes() {
  * shiftId: id вахты или null — «Без вахты». amount — целые рубли.
  */
 export function addIncome({ shiftId = null, amount, date, category, note = '' }) {
-  return put('incomes', { shiftId, amount, date, category, note, attachments: [] });
+  return put('incomes', {
+    shiftId, amount, date, category, note, attachments: [],
+    createdAt: new Date().toISOString(),   // нужно для напоминания о резервной копии
+  });
 }
 
 /** Изменить поступление (вложения не трогаем — они живут отдельными записями). */
@@ -390,7 +394,10 @@ export async function listExpenses() {
 
 /** Создать расход. categoryId — id категории, shiftId — id вахты или null («Без вахты»). */
 export function addExpense({ shiftId = null, amount, date, categoryId, note = '' }) {
-  return put('expenses', { shiftId, amount, date, categoryId, note });
+  return put('expenses', {
+    shiftId, amount, date, categoryId, note,
+    createdAt: new Date().toISOString(),
+  });
 }
 
 /** Изменить расход. */
@@ -440,6 +447,31 @@ export function deleteAttachmentCascade(incomeId, attachmentId) {
       const left = (income.attachments || []).filter((id) => id !== attachmentId);
       incomes.put({ ...income, attachments: left });
     };
+  });
+}
+
+/* ─────────────────────────── замена всех данных (импорт копии) ─────────────────────────── */
+
+/**
+ * Полностью заменяет данные (для восстановления из копии) в ОДНОЙ транзакции.
+ * Если что-то пойдёт не так, IndexedDB откатит транзакцию целиком —
+ * старые данные останутся нетронутыми.
+ *
+ * settings — итоговые настройки: PIN и служебные флаги устройства сохраняет вызывающий.
+ */
+export function replaceAll({ shifts, incomes, expenses, categories, attachments, settings }) {
+  const names = ['shifts', 'incomes', 'expenses', 'categories', 'attachments', 'meta'];
+  return run(names, 'readwrite', (shiftsStore, incomesStore, expensesStore, categoriesStore, attachmentsStore, meta) => {
+    // сначала очищаем всё (запросы выполняются в порядке добавления)
+    for (const store of [shiftsStore, incomesStore, expensesStore, categoriesStore, attachmentsStore]) {
+      store.clear();
+    }
+    for (const shift of shifts) shiftsStore.put(shift);
+    for (const income of incomes) incomesStore.put(income);
+    for (const expense of expenses) expensesStore.put(expense);
+    for (const category of categories) categoriesStore.put(category);
+    for (const attachment of attachments) attachmentsStore.put(attachment);
+    if (settings) meta.put({ key: 'settings', value: settings });
   });
 }
 

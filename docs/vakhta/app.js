@@ -14,6 +14,7 @@
 import * as db from './db.js';
 import * as D from './dates.js';
 import * as F from './files.js';
+import * as backup from './backup.js';
 
 /* ═══════════════════════════ состояние ═══════════════════════════ */
 
@@ -114,6 +115,7 @@ const ICON = {
   photo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 5-4 4 3 3-2 4 3"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><rect x="5" y="12" width="4" height="6" rx="1"/><rect x="11" y="7" width="4" height="11" rx="1"/><rect x="17" y="14" width="4" height="4" rx="1"/></svg>',
   wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14h2"/></svg>',
+  save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h7V3M8 15h8v6H8z"/></svg>',
 };
 
 /* ═══════════════════════════ запуск ═══════════════════════════ */
@@ -370,6 +372,10 @@ function homeView() {
 
   const active = activeShift(today);
   const parts = [];
+
+  // напоминание о резервной копии — наверху, чтобы его точно увидели
+  const reminder = backupReminderHtml();
+  if (reminder) parts.push(reminder);
 
   if (active) {
     parts.push(gaugeCard(active, today));
@@ -2239,6 +2245,209 @@ function tableCard(rows, today) {
     </section>`;
 }
 
+/* ═══════════════════════════ «Копия и экспорт» ═══════════════════════════ */
+
+function dataView() {
+  const settings = state.settings;
+  const lastBackup = settings.lastBackupAt
+    ? `${D.formatDate(settings.lastBackupAt)}${settings.dirtyAfterBackup ? ' · есть изменения' : ''}`
+    : 'ещё не делали';
+
+  const attachments = state.incomes.reduce((total, income) => total + (income.attachments || []).length, 0);
+
+  return {
+    title: 'Копия и экспорт',
+    html: `
+      <section class="card">
+        <h2 class="card-title">Резервная копия</h2>
+        <p class="muted small">Один файл JSON со всеми данными, включая расчётные листки.
+          Лежит только там, куда вы его сохраните: «Файлы», iCloud, почта.</p>
+        <dl class="kv" style="margin:12px 0">
+          <div class="kv__row"><dt>Последняя копия</dt><dd class="num">${esc(lastBackup)}</dd></div>
+          <div class="kv__row"><dt>В базе</dt>
+            <dd class="num">${state.shifts.length} вахт · ${state.incomes.length} поступлений · ${state.expenses.length} расходов · ${attachments} файлов</dd></div>
+        </dl>
+        <div class="stack-sm">
+          <button class="btn btn--primary btn--block" data-act="backup-export">Экспорт копии</button>
+          <button class="btn btn--block" data-act="backup-import">Импорт копии</button>
+        </div>
+        <input class="hidden" type="file" id="backup-file" accept="application/json,.json">
+        <p class="muted small" style="margin-top:10px">При импорте текущие данные заменяются данными из файла.
+          PIN-код из копии не восстанавливается — защита входа настраивается на этом устройстве заново.</p>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Выписка CSV</h2>
+        <p class="muted small">Поступления и расходы одной таблицей: дата, тип, вахта, категория, сумма, заметка.
+          Кодировка UTF-8 с BOM, разделитель «;» — открывается в Excel и «Числах».</p>
+        <div class="stack-sm" style="margin-top:12px">
+          <button class="btn btn--block" data-act="csv-export">Экспорт CSV</button>
+        </div>
+      </section>`,
+    after: (root) => {
+      const input = root.querySelector('#backup-file');
+      if (input) input.addEventListener('change', (event) => onBackupFilePicked(event));
+    },
+  };
+}
+
+/** Готовит и сохраняет копию. Возвращает true, если файл действительно сохранён. */
+async function exportBackup() {
+  try {
+    toast('Собираю копию…');
+    const data = await backup.buildBackup();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+
+    const result = await F.saveFile(blob, backup.backupFileName(), {
+      title: 'Резервная копия «Счётчик вахты»',
+      text: 'Файл со всеми данными приложения',
+    });
+
+    if (result === 'cancelled') {
+      toast('Сохранение копии отменено');
+      return false;
+    }
+
+    await db.saveSettings({ lastBackupAt: D.todayKey(), dirtyAfterBackup: false, backupSnoozeUntil: null });
+    await reload();
+    render();
+    toast(`Копия сохранена (${F.humanSize(blob.size)})`, 'ok');
+    return true;
+  } catch (error) {
+    console.error(error);
+    toast(F.storageErrorMessage(error), 'error');
+    return false;
+  }
+}
+
+/** Импорт: читаем файл → полностью проверяем → подтверждение → замена данных. */
+async function onBackupFilePicked(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+
+  let text;
+  try {
+    text = await file.text();
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось прочитать файл', 'error');
+    return;
+  }
+
+  const result = backup.readBackup(text);
+  if (!result.ok) {
+    await openSheet({
+      title: 'Файл не подошёл',
+      message: `${result.error}\n\nТекущие данные не тронуты.`,
+      confirmText: 'Понятно',
+      cancelText: 'Закрыть',
+    });
+    return;
+  }
+
+  const summary = result.summary;
+  const message = [
+    `Копия от ${summary.createdAt ? D.formatDate(summary.createdAt.slice(0, 10)) : 'неизвестной даты'}:`,
+    `${summary.shifts} вахт, ${summary.incomes} поступлений, ${summary.expenses} расходов, ${summary.attachments} файлов (${F.humanSize(summary.attachmentsBytes)}).`,
+    '',
+    'Все текущие данные будут заменены этими. Отменить это нельзя.',
+    result.fixes.length ? `Приведение к целостности: ${result.fixes.length}.` : '',
+  ].filter(Boolean).join('\n');
+
+  const answer = await openSheet({
+    title: 'Восстановить данные из копии?',
+    message,
+    confirmText: 'Заменить данные',
+    danger: true,
+  });
+  if (answer !== 'ok') return;
+
+  try {
+    toast('Восстанавливаю данные…');
+    await backup.importBackup(result.data);
+    state.attachmentForm = null;
+    state.formDraft = null;
+    await reload();
+    render();
+    toast('Данные восстановлены из копии', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось восстановить — данные не изменены', 'error');
+  }
+}
+
+/** Экспорт CSV с поступлениями и расходами. */
+async function exportCsv() {
+  try {
+    const blob = await backup.buildCsvFile();
+    const result = await F.saveFile(blob, backup.csvFileName(), {
+      title: 'Выписка «Счётчик вахты»',
+      text: 'Поступления и расходы',
+    });
+    if (result === 'cancelled') {
+      toast('Экспорт отменён');
+      return;
+    }
+    toast('Выписка сохранена', 'ok');
+  } catch (error) {
+    console.error(error);
+    toast('Не удалось сохранить выписку', 'error');
+  }
+}
+
+/* ── напоминание о резервной копии ── */
+
+/**
+ * Пора ли напоминать про копию.
+ * Условие из задания: после последней копии были изменения И
+ * (добавлено поступление ИЛИ прошло 7 дней и больше).
+ */
+function shouldRemindBackup(today = D.todayKey()) {
+  const settings = state.settings;
+  if (!settings.dirtyAfterBackup) return false;
+  if (settings.backupSnoozeUntil && Date.now() < settings.backupSnoozeUntil) return false;
+
+  const lastBackup = settings.lastBackupAt || null;
+  const incomeAdded = state.incomes.some((income) => {
+    if (!income.createdAt) return false;
+    if (!lastBackup) return true;
+    return income.createdAt.slice(0, 10) > lastBackup;
+  });
+  const daysSince = lastBackup ? D.diffDays(lastBackup, today) : Infinity;
+  return incomeAdded || daysSince >= 7;
+}
+
+function backupReminderHtml() {
+  if (!shouldRemindBackup()) return '';
+  const lastBackup = state.settings.lastBackupAt;
+  return `
+    <div class="banner" role="status">
+      <span class="grow">
+        ${lastBackup ? 'Копия данных устарела' : 'Копии ещё не было'}
+        <span class="muted small"> — данные есть только на этом устройстве.</span>
+      </span>
+      <span class="banner__actions">
+        <button class="btn btn--primary" data-act="backup-export">Экспорт</button>
+        <button class="btn" data-act="backup-snooze" aria-label="Скрыть напоминание на сутки">24 ч</button>
+      </span>
+    </div>`;
+}
+
+/** Прячет напоминание на 24 часа. */
+async function snoozeBackup() {
+  const until = Date.now() + 24 * 60 * 60 * 1000;
+  try {
+    await db.saveSettings({ backupSnoozeUntil: until });
+    state.settings.backupSnoozeUntil = until;
+    render();
+    toast('Напомню через сутки');
+  } catch (error) {
+    console.error(error);
+    render();
+  }
+}
+
 /* ═══════════════════════════ разделы следующих шагов ═══════════════════════════ */
 
 function soonView(title, text) {
@@ -2257,6 +2466,7 @@ function moreView() {
     { act: 'open-shifts', icon: ICON.shift, label: 'Вахты', value: state.shifts.length },
     { act: 'open-compare', icon: ICON.chart, label: 'Сравнение вахт', value: '' },
     { act: 'open-categories', icon: ICON.wallet, label: 'Категории расходов', value: state.categories.length },
+    { act: 'open-data', icon: ICON.save, label: 'Копия и экспорт', value: state.settings.lastBackupAt ? D.formatDayMonth(state.settings.lastBackupAt) : '' },
   ];
 
   return {
@@ -2277,8 +2487,7 @@ function moreView() {
             </button>
           </li>`).join('')}
       </ul>
-      <p class="muted small">Дальше появятся: резервная копия и восстановление, экспорт CSV,
-        PIN-код и информация о хранении данных.</p>`,
+      <p class="muted small">Дальше появятся: PIN-код для входа и информация о хранении данных.</p>`,
   };
 }
 
@@ -2398,6 +2607,15 @@ function onClick(event) {
   if (act === 'category-rename') { renameCategory(target.dataset.id); return; }
   if (act === 'category-delete') { deleteCategory(target.dataset.id); return; }
   if (act === 'open-compare') { state.tab = 'more'; push('compare', {}); return; }
+  if (act === 'open-data') { push('data', {}); return; }
+  if (act === 'backup-export') { exportBackup(); return; }
+  if (act === 'backup-snooze') { snoozeBackup(); return; }
+  if (act === 'csv-export') { exportCsv(); return; }
+  if (act === 'backup-import') {
+    const input = document.querySelector('#backup-file');
+    if (input) input.click();
+    return;
+  }
   if (act === 'income-edit') { push('incomeForm', { id: Number(target.dataset.id) }); return; }
   if (act === 'income-delete') { deleteIncome(Number(target.dataset.id)); return; }
   if (act === 'pick-file') {
@@ -2444,7 +2662,7 @@ function onSubmit(event) {
 
 /* ═══════════════════════════ service worker и обновление ═══════════════════════════ */
 
-const SW_VERSION = 'v4';   // при изменении файлов приложения поднимаем вместе с sw.js
+const SW_VERSION = 'v5';   // при изменении файлов приложения поднимаем вместе с sw.js
 
 async function initServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
@@ -2505,6 +2723,7 @@ const VIEWS = {
   expenseForm: expenseFormView,
   categories: categoriesView,
   compare: compareView,
+  data: dataView,
   more: moreView,
   shifts: shiftsView,
   shiftForm: shiftFormView,
